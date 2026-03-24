@@ -118,9 +118,26 @@ workflow susie_finemapping {
                 estimate_residual_variance = estimate_residual_variance,
                 docker                     = r_docker
         }
+
+        ## 5. Create locuszoom-style plot with SuSiE overlays
+        call plot_locus {
+            input:
+                z_scores          = prepare_locus_sumstats.z_scores_tsv,
+                pip_tsv           = run_susie.pip_tsv,
+                credible_sets_tsv = run_susie.credible_sets_tsv,
+                ld_matrix         = compute_ld.ld_matrix,
+                variant_ids       = compute_ld.variant_ids,
+                phenotype         = locus_phenotype,
+                chrom             = locus_chrom,
+                start             = locus_start,
+                end               = locus_end,
+                index_snp         = locus_index_snp,
+                p_threshold       = p_threshold,
+                docker            = r_docker
+        }
     }
 
-    ## Step 5: Combine all loci results
+    ## Step 6: Combine all loci results
     
     call combine_results {
         input:
@@ -133,6 +150,9 @@ workflow susie_finemapping {
         File          merged_credible_sets = combine_results.merged_credible_sets
         Array[File]   susie_rds_all        = run_susie.susie_rds
         Array[File]   susie_logs           = run_susie.log
+        Array[File]   locuszoom_pdfs       = plot_locus.plot_pdf
+        Array[File]   locuszoom_pngs       = plot_locus.plot_png
+        Array[File]   locuszoom_plot_data  = plot_locus.plot_data_tsv
         File          loci_manifest        = identify_loci.loci_manifest
     }
 }
@@ -459,6 +479,7 @@ task compute_ld {
         ## Extract variants in the locus window
         ./plink2 \
             --pfile ~{plink2_prefix} \
+            --no-pheno \
             --chr ~{chrom} \
             --from-bp ~{start} \
             --to-bp ~{end} \
@@ -474,6 +495,7 @@ task compute_ld {
         ## Compute full symmetric LD matrix (r, not r^2) expected by susie_rss()
         ./plink2 \
             --pfile ~{out_prefix}.extracted \
+            --no-pheno \
             --r-unphased square \
             --threads ~{threads} \
             --out ~{out_prefix}
@@ -756,6 +778,308 @@ task run_susie {
         File credible_sets_tsv = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.credible_sets.tsv"
         File susie_rds         = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.rds"
         File log               = stdout()
+    }
+}
+
+
+task plot_locus {
+
+    input {
+        File   z_scores
+        File   pip_tsv
+        File   credible_sets_tsv
+        File   ld_matrix
+        File   variant_ids
+        String phenotype
+        String chrom
+        String start
+        String end
+        String index_snp
+        Float  p_threshold
+        String docker
+    }
+
+    command <<<
+        set -euo pipefail
+
+        Rscript - <<'REOF'
+        if (!requireNamespace("data.table", quietly = TRUE))
+            install.packages("data.table", repos = "https://cloud.r-project.org", quiet = TRUE)
+        if (!requireNamespace("ggplot2", quietly = TRUE))
+            install.packages("ggplot2", repos = "https://cloud.r-project.org", quiet = TRUE)
+        if (!requireNamespace("cowplot", quietly = TRUE))
+            install.packages("cowplot", repos = "https://cloud.r-project.org", quiet = TRUE)
+
+        library(data.table)
+        library(ggplot2)
+        library(cowplot)
+
+        phenotype <- "~{phenotype}"
+        chrom <- "~{chrom}"
+        locus_chr <- if (grepl("^chr", chrom, ignore.case = TRUE)) chrom else paste0("chr", chrom)
+        locus_start <- as.numeric("~{start}")
+        locus_end <- as.numeric("~{end}")
+        index_snp <- "~{index_snp}"
+        p_threshold <- ~{p_threshold}
+        out_prefix <- paste0("locuszoom_", phenotype, "_", chrom, "_", locus_start, "_", locus_end)
+
+        zdf <- fread("~{z_scores}")
+        pip_df <- fread("~{pip_tsv}")
+
+        cs_df <- if (file.exists("~{credible_sets_tsv}") && file.info("~{credible_sets_tsv}")$size > 0) {
+            fread("~{credible_sets_tsv}")
+        } else {
+            data.table(ID = character(), credible_set = character())
+        }
+
+        variant_ids <- readLines("~{variant_ids}")
+        R_mat <- as.matrix(fread("~{ld_matrix}", header = FALSE))
+        rownames(R_mat) <- variant_ids
+        colnames(R_mat) <- variant_ids
+
+        lead_id <- NA_character_
+        if (index_snp %in% variant_ids) {
+            lead_id <- index_snp
+        } else if (nrow(pip_df[!is.na(PIP)]) > 0) {
+            lead_id <- pip_df[order(-PIP)][["ID"]][1]
+        } else if (nrow(zdf[!is.na(P)]) > 0) {
+            lead_id <- zdf[order(P)][["ID"]][1]
+        }
+
+        r2_df <- data.table(ID = variant_ids, r2 = NA_real_)
+        if (!is.na(lead_id) && lead_id %in% variant_ids) {
+            r2_df[, r2 := as.numeric(R_mat[lead_id, ])^2]
+        }
+
+        cs_annot <- cs_df[, .(
+            credible_sets = paste(unique(credible_set), collapse = ","),
+            in_credible_set = .N > 0
+        ), by = ID]
+
+        plot_df <- merge(zdf, pip_df[, .(ID, PIP)], by = "ID", all.x = TRUE)
+        plot_df <- merge(plot_df, cs_annot, by = "ID", all.x = TRUE)
+        plot_df <- merge(plot_df, r2_df, by = "ID", all.x = TRUE)
+
+        plot_df[is.na(PIP), PIP := 0]
+        plot_df[is.na(in_credible_set), in_credible_set := FALSE]
+        plot_df[is.na(credible_sets), credible_sets := ""]
+        plot_df[, neg_log10_p := -log10(pmax(P, 1e-300))]
+
+        assign_gene_tracks <- function(gene_df) {
+            if (nrow(gene_df) == 0) return(gene_df)
+
+            gene_df <- gene_df[order(start, end)]
+            tracks <- integer(nrow(gene_df))
+            tracks[1] <- 1L
+            buffer <- 1000
+
+            if (nrow(gene_df) > 1) {
+                for (i in 2:nrow(gene_df)) {
+                    for (track in seq_len(i)) {
+                        overlaps <- FALSE
+                        for (j in seq_len(i - 1)) {
+                            if (tracks[j] == track && gene_df$start[i] <= gene_df$end[j] + buffer) {
+                                overlaps <- TRUE
+                                break
+                            }
+                        }
+                        if (!overlaps) {
+                            tracks[i] <- track
+                            break
+                        }
+                    }
+                }
+            }
+
+            gene_df[, track := tracks]
+            gene_df
+        }
+
+        gencode_url <- "https://raw.githubusercontent.com/weinstocklab/gwasplot/main/data/gencode.rda"
+        utils::download.file(gencode_url, destfile = "gencode.rda", mode = "wb", quiet = TRUE)
+        load("gencode.rda")
+        gencode_dt <- as.data.table(gencode)
+
+        genes <- gencode_dt[
+            type == "gene" &
+            gene_biotype == "protein_coding" &
+            chrom == locus_chr &
+            start <= locus_end &
+            end >= locus_start,
+            .(gene_id, gene_name, start, end)
+        ]
+
+        exons <- gencode_dt[
+            type == "CDS" &
+            chrom == locus_chr &
+            start <= locus_end &
+            end >= locus_start,
+            .(gene_id, start, end)
+        ]
+
+        plot_df[, ld_bin := fifelse(
+            is.na(r2), "Unknown",
+            fifelse(r2 >= 0.8, "0.8-1.0",
+            fifelse(r2 >= 0.6, "0.6-0.8",
+            fifelse(r2 >= 0.4, "0.4-0.6",
+            fifelse(r2 >= 0.2, "0.2-0.4",
+            fifelse(r2 > 0, "0-0.2", "0"))))))
+        ]
+        plot_df[, ld_bin := factor(ld_bin, levels = c("Unknown", "0", "0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0"))]
+
+        label_df <- unique(rbindlist(list(
+            plot_df[ID == lead_id],
+            plot_df[order(-PIP)][1:min(5, .N)],
+            plot_df[in_credible_set == TRUE][1:min(5, .N)]
+        ), fill = TRUE), by = "ID")
+
+        p_assoc <- ggplot(plot_df, aes(x = POS, y = neg_log10_p)) +
+            geom_point(aes(color = ld_bin, size = pmax(PIP, 0.02), shape = in_credible_set), alpha = 0.85) +
+            geom_hline(yintercept = -log10(p_threshold), linetype = "dashed", color = "firebrick") +
+            geom_text(
+                data = label_df,
+                aes(label = ID),
+                size = 2.5,
+                vjust = -0.7,
+                check_overlap = TRUE,
+                show.legend = FALSE
+            ) +
+            scale_color_manual(
+                values = c(
+                    "Unknown" = "grey70",
+                    "0" = "steelblue4",
+                    "0-0.2" = "deepskyblue3",
+                    "0.2-0.4" = "darkolivegreen3",
+                    "0.4-0.6" = "goldenrod2",
+                    "0.6-0.8" = "darkorange2",
+                    "0.8-1.0" = "firebrick3"
+                ),
+                drop = FALSE
+            ) +
+            scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17)) +
+            scale_size_continuous(range = c(1.2, 5), name = "SuSiE PIP") +
+            scale_x_continuous(
+                limits = c(locus_start, locus_end),
+                expand = c(0, 0)
+            ) +
+            labs(
+                title = paste0("Locus plot: ", phenotype, " chr", chrom, ":", locus_start, "-", locus_end),
+                subtitle = paste0("Lead/index SNP: ", lead_id),
+                x = NULL,
+                y = expression(-log[10](P)),
+                color = expression(LD~(r^2)),
+                shape = "Credible set"
+            ) +
+            theme_bw(base_size = 11) +
+            theme(
+                plot.title = element_text(face = "bold"),
+                legend.position = "right",
+                panel.grid.minor = element_blank(),
+                axis.title.x = element_blank(),
+                axis.text.x = element_blank(),
+                axis.ticks.x = element_blank(),
+                plot.margin = margin(t = 5, r = 10, b = 0, l = 5, unit = "pt")
+            )
+
+        if (nrow(genes) > 0) {
+            genes <- assign_gene_tracks(copy(genes))
+            max_track <- max(genes$track)
+            gene_body_height <- 0.15
+            exon_height <- 0.4
+            track_spacing <- 0.6
+
+            genes[, `:=`(
+                y_center = (track - 1) * track_spacing,
+                y_min = y_center - gene_body_height / 2,
+                y_max = y_center + gene_body_height / 2,
+                label_y = y_center + exon_height / 2 + 0.1
+            )]
+
+            if (nrow(exons) > 0) {
+                exons <- merge(exons, genes[, .(gene_id, track, y_center)], by = "gene_id", all.x = TRUE)
+                exons <- exons[!is.na(track)]
+                exons[, `:=`(
+                    y_min = y_center - exon_height / 2,
+                    y_max = y_center + exon_height / 2
+                )]
+            }
+
+            p_genes <- ggplot() +
+                geom_rect(
+                    data = genes,
+                    aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
+                    fill = "#cccccc",
+                    color = "#999999",
+                    alpha = 0.7
+                )
+
+            if (nrow(exons) > 0) {
+                p_genes <- p_genes +
+                    geom_rect(
+                        data = exons,
+                        aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
+                        fill = "#2c3e50",
+                        color = "#34495e",
+                        alpha = 0.9
+                    )
+            }
+
+            p_genes <- p_genes +
+                geom_text(
+                    data = genes,
+                    aes(x = (start + end) / 2, y = label_y, label = gene_name),
+                    size = 3.8,
+                    hjust = 0.5,
+                    vjust = 0,
+                    fontface = "italic",
+                    color = "#2c3e50"
+                ) +
+                scale_y_continuous(
+                    limits = c(-0.2, max_track * track_spacing + 0.1),
+                    expand = expansion(mult = c(0, 0))
+                ) +
+                scale_x_continuous(
+                    limits = c(locus_start, locus_end),
+                    expand = c(0, 0)
+                ) +
+                labs(x = paste0("Position on chr", chrom)) +
+                theme_void() +
+                theme(
+                    axis.title.x = element_text(size = 10, margin = margin(t = 4)),
+                    plot.margin = margin(t = 0, r = 10, b = 5, l = 5, unit = "pt")
+                )
+        } else {
+            p_genes <- ggplot() +
+                geom_blank() +
+                scale_x_continuous(
+                    limits = c(locus_start, locus_end),
+                    expand = c(0, 0)
+                ) +
+                labs(x = paste0("Position on chr", chrom)) +
+                theme_void() +
+                theme(
+                    axis.title.x = element_text(size = 10, margin = margin(t = 4)),
+                    plot.margin = margin(t = 0, r = 10, b = 5, l = 5, unit = "pt")
+                )
+        }
+
+        p <- cowplot::plot_grid(p_assoc, p_genes, ncol = 1, align = "v", rel_heights = c(5, 1.2))
+
+        ggsave(paste0(out_prefix, ".pdf"), p, width = 10, height = 7)
+        ggsave(paste0(out_prefix, ".png"), p, width = 10, height = 7, dpi = 200)
+        fwrite(plot_df, paste0(out_prefix, ".plot_data.tsv"), sep = "\t")
+        REOF
+    >>>
+
+    runtime {
+        docker: "~{docker}"
+        dx_instance_type: "mem2_ssd1_v2_x2"
+    }
+
+    output {
+        File plot_pdf      = "locuszoom_~{phenotype}_~{chrom}_~{start}_~{end}.pdf"
+        File plot_png      = "locuszoom_~{phenotype}_~{chrom}_~{start}_~{end}.png"
+        File plot_data_tsv = "locuszoom_~{phenotype}_~{chrom}_~{start}_~{end}.plot_data.tsv"
     }
 }
 
