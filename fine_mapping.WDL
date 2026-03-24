@@ -487,6 +487,7 @@ task compute_ld {
         set -euo pipefail
 
         echo "$(date -u) Computing LD for ~{chrom}:~{start}-~{end}"
+        printf "not_started\n" > ld_status.txt
 
         ln -sf ~{psam} ~{plink2_prefix}.psam
         ln -sf ~{pvar} ~{plink2_prefix}.pvar
@@ -526,14 +527,30 @@ task compute_ld {
             exit 14
         elif [[ "${variant_count}" -eq 1 ]]; then
             printf "1\n" > ~{out_prefix}.unphased.vcor
+            printf "single_variant_identity\n" > ld_status.txt
         else
             ## Compute full symmetric LD matrix (r, not r^2) expected by susie_rss()
             ./plink2 \
                 --pfile ~{out_prefix}.extracted \
                 --no-pheno \
-                --r-unphased square \
+                --r-unphased square allow-ambiguous-allele \
                 --threads ~{threads} \
                 --out ~{out_prefix}
+
+            if [[ -s "~{out_prefix}.unphased.vcor" ]]; then
+                printf "plink_generated\n" > ld_status.txt
+            else
+                echo "WARNING: PLINK did not emit ~{out_prefix}.unphased.vcor; using identity fallback for ${variant_count} variants" >&2
+                awk -v n="${variant_count}" 'BEGIN {
+                    for (i = 1; i <= n; ++i) {
+                        for (j = 1; j <= n; ++j) {
+                            printf("%s%d", (j == 1 ? "" : " "), (i == j ? 1 : 0))
+                        }
+                        printf("\n")
+                    }
+                }' > ~{out_prefix}.unphased.vcor
+                printf "plink_missing_identity_fallback\n" > ld_status.txt
+            fi
         fi
 
         echo "$(date -u) Done computing LD"
@@ -554,6 +571,7 @@ task compute_ld {
         File   ld_matrix   = "~{out_prefix}.unphased.vcor"
         File   variant_ids = "~{out_prefix}.variant_ids.txt"
         String n_samples   = read_string("n_samples.txt")
+        String ld_status   = read_string("ld_status.txt")
     }
 }
 
