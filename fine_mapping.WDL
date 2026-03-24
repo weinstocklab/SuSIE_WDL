@@ -1,0 +1,662 @@
+version 1.0
+
+
+workflow susie_finemapping {
+
+    input {
+
+        ## Summary statistics
+        ## Concatenated REGENIE output parquet with all phenotypes included.
+        File            summary_stats_parquet
+
+        ## Genotype files for LD computation 
+        ## same step2 chunk manifest used in REGENIE
+       
+        File            step2_chunk_manifest
+
+        ## Sample / variant filters 
+        File            sample_keep_file
+
+        ## Fine-mapping parameters 
+        Float           p_threshold     = 5e-8   # genome-wide significance
+        Int             window_kb       = 500     # +/- kb around index SNP
+        Int             max_causal      = 10      # L parameter in SuSiE
+        Float           min_abs_corr    = 0.5     # min |r| for credible sets
+        Float           coverage        = 0.95    # credible set coverage
+        Int             max_iter        = 500     # SuSiE max iterations
+        Float           tol             = 1e-3    # SuSiE convergence tol
+        Boolean         refine          = true    # use SuSiE refinement
+        Boolean         estimate_residual_variance = true
+
+        ## Plink2 binary 
+        File            plink2_binary
+
+        ## Runtime 
+        Int             threads     = 4
+        String          r_docker    = "rocker/r-ver:4.3.0"
+    }
+
+    
+    ## Step 1: Identify significant loci per phenotype.
+    call identify_loci {
+        input:
+            summary_stats_parquet = summary_stats_parquet,
+            step2_chunk_manifest  = step2_chunk_manifest,
+            p_threshold           = p_threshold,
+            window_kb             = window_kb
+    }
+
+ 
+    ## Steps 2-4: For each significant locus, run full LD computation + SuSiE pipeline
+
+    Array[Array[String]] loci   = read_tsv(identify_loci.loci_manifest)
+    Int                  n_loci = length(loci) - 1   # remove header row
+
+    scatter (i in range(n_loci)) {
+
+        String locus_phenotype = loci[i + 1][0]
+        String locus_chrom     = loci[i + 1][1]
+        String locus_index_snp = loci[i + 1][3]
+        String locus_start     = loci[i + 1][4]
+        String locus_end       = loci[i + 1][5]
+        String locus_pvar_path = loci[i + 1][6]
+        String locus_psam_path = loci[i + 1][7]
+        String locus_pgen_path = loci[i + 1][8]
+
+        ## 2. Compute LD matrix
+        call compute_ld {
+            input:
+                pvar          = "dx://" + locus_pvar_path,
+                psam          = "dx://" + locus_psam_path,
+                pgen          = "dx://" + locus_pgen_path,
+                plink2_prefix = basename(locus_pvar_path, ".pvar"),
+                plink2_binary = plink2_binary,
+                chrom         = locus_chrom,
+                start         = locus_start,
+                end           = locus_end,
+                sample_keep   = sample_keep_file,
+                out_prefix    = "ld_~{locus_chrom}_~{locus_start}_~{locus_end}_~{locus_phenotype}",
+                threads       = threads
+        }
+
+        ## 3. Prepare per-locus summary stats
+        call prepare_locus_sumstats {
+            input:
+                summary_stats_parquet = summary_stats_parquet,
+                phenotype             = locus_phenotype,
+                chrom                 = locus_chrom,
+                start                 = locus_start,
+                end                   = locus_end,
+                variant_ids           = compute_ld.variant_ids
+        }
+
+        ## 4. Run SuSiE
+        call run_susie {
+            input:
+                z_scores                   = prepare_locus_sumstats.z_scores_tsv,
+                ld_matrix                  = compute_ld.ld_matrix,
+                variant_ids                = compute_ld.variant_ids,
+                phenotype                  = locus_phenotype,
+                chrom                      = locus_chrom,
+                start                      = locus_start,
+                end                        = locus_end,
+                index_snp                  = locus_index_snp,
+                n_samples                  = compute_ld.n_samples,
+                max_causal                 = max_causal,
+                min_abs_corr               = min_abs_corr,
+                coverage                   = coverage,
+                max_iter                   = max_iter,
+                tol                        = tol,
+                refine                     = refine,
+                estimate_residual_variance = estimate_residual_variance,
+                docker                     = r_docker
+        }
+    }
+
+    ## Step 5: Combine all loci results
+    
+    call combine_results {
+        input:
+            pip_tsvs          = run_susie.pip_tsv,
+            credible_set_tsvs = run_susie.credible_sets_tsv
+    }
+
+    output {
+        File          merged_pip           = combine_results.merged_pip
+        File          merged_credible_sets = combine_results.merged_credible_sets
+        Array[File]   susie_rds_all        = run_susie.susie_rds
+        Array[File]   susie_logs           = run_susie.log
+        File          loci_manifest        = identify_loci.loci_manifest
+    }
+}
+
+
+## TASKS
+
+task identify_loci {
+
+    input {
+        File    summary_stats_parquet
+        File    step2_chunk_manifest
+        Float   p_threshold
+        Int     window_kb
+    }
+
+    command <<<
+        set -euo pipefail
+
+        pip install duckdb pandas numpy --quiet
+
+        python3 <<'PYEOF'
+        import duckdb
+        import pandas as pd
+        import numpy as np
+
+        p_thresh  = ~{p_threshold}
+        window_kb = ~{window_kb}
+        log10p_thresh = -np.log10(p_thresh)
+
+        con = duckdb.connect()
+        sig = con.execute(
+            """
+            SELECT
+                phenotype,
+                CHROM,
+                CAST(POS AS BIGINT) AS POS,
+                ID,
+                CAST(LOG10P AS DOUBLE) AS LOG10P
+            FROM read_parquet(?)
+            WHERE LOG10P >= ?
+            ORDER BY phenotype, LOG10P DESC, POS ASC
+            """,
+            ["~{summary_stats_parquet}", float(log10p_thresh)],
+        ).df()
+
+        sig["CHROM"] = sig["CHROM"].astype(str).str.replace("^chr", "", regex=True)
+        sig["POS"] = sig["POS"].astype(int)
+
+        loci = []
+        for pheno, pheno_df in sig.groupby("phenotype", sort=True):
+            used = set()
+            for _, row in pheno_df.iterrows():
+                snp_key = (row["CHROM"], int(row["POS"]))
+                if snp_key in used:
+                    continue
+
+                chrom  = row["CHROM"]
+                pos    = int(row["POS"])
+                win_st = max(1, pos - window_kb * 1000)
+                win_en = pos + window_kb * 1000
+                snp_id = row["ID"] if pd.notna(row["ID"]) else f"{chrom}:{pos}"
+
+                loci.append({
+                    "phenotype": pheno,
+                    "chrom": chrom,
+                    "pos": pos,
+                    "index_snp": snp_id,
+                    "window_start": win_st,
+                    "window_end": win_en,
+                })
+
+                in_window = (
+                    (pheno_df["CHROM"] == chrom)
+                    & (pheno_df["POS"] >= win_st)
+                    & (pheno_df["POS"] <= win_en)
+                )
+                for hit in pheno_df.loc[in_window, ["CHROM", "POS"]].itertuples(index=False):
+                    used.add((hit.CHROM, int(hit.POS)))
+
+        loci_df = pd.DataFrame(
+            loci,
+            columns=[
+                "phenotype",
+                "chrom",
+                "pos",
+                "index_snp",
+                "window_start",
+                "window_end",
+            ],
+        )
+
+        manifest = pd.read_csv("~{step2_chunk_manifest}", sep="\t")
+        required_cols = [
+            "chrom",
+            "start",
+            "end",
+            "plink2_chrom_pvar",
+            "plink2_chrom_psam",
+            "plink2_chrom_pgen",
+        ]
+        missing_cols = [c for c in required_cols if c not in manifest.columns]
+        if missing_cols:
+            raise ValueError(f"step2_chunk_manifest is missing columns: {missing_cols}")
+
+        manifest = manifest[required_cols].copy()
+        manifest["chrom"] = manifest["chrom"].astype(str).str.replace("^chr", "", regex=True)
+        manifest["start"] = manifest["start"].astype(int)
+        manifest["end"] = manifest["end"].astype(int)
+
+        if loci_df.empty:
+            merged = pd.DataFrame(columns=[
+                "phenotype",
+                "chrom",
+                "pos",
+                "index_snp",
+                "window_start",
+                "window_end",
+                "pvar_dx_path",
+                "psam_dx_path",
+                "pgen_dx_path",
+            ])
+        else:
+            rows = []
+            for locus in loci_df.to_dict(orient="records"):
+                matches = manifest[
+                    (manifest["chrom"] == locus["chrom"])
+                    & (manifest["start"] <= locus["pos"])
+                    & (manifest["end"] >= locus["pos"])
+                ]
+                if matches.empty:
+                    raise ValueError(
+                        f"No step2 manifest row covers {locus['chrom']}:{locus['pos']} "
+                        f"for phenotype {locus['phenotype']}"
+                    )
+                if len(matches) > 1:
+                    raise ValueError(
+                        f"Multiple step2 manifest rows cover {locus['chrom']}:{locus['pos']} "
+                        f"for phenotype {locus['phenotype']}"
+                    )
+
+                match = matches.iloc[0]
+                locus["pvar_dx_path"] = match["plink2_chrom_pvar"]
+                locus["psam_dx_path"] = match["plink2_chrom_psam"]
+                locus["pgen_dx_path"] = match["plink2_chrom_pgen"]
+                rows.append(locus)
+
+            merged = pd.DataFrame(rows)
+
+        merged.to_csv("merged_loci_manifest.tsv", sep="\t", index=False)
+        print(f"Total loci to fine-map: {len(merged)}")
+        PYEOF
+    >>>
+
+    runtime {
+        docker: "python:3.11-slim"
+        dx_instance_type: "mem1_ssd1_v2_x2"
+    }
+
+    output {
+        File loci_manifest = "merged_loci_manifest.tsv"
+    }
+}
+
+
+task compute_ld {
+
+    input {
+        File    pvar
+        File    psam
+        File    pgen
+        String  plink2_prefix
+        File    plink2_binary
+        String  chrom
+        String  start
+        String  end
+        File    sample_keep
+        String  out_prefix
+        Int     threads
+    }
+
+    command <<<
+        set -euo pipefail
+
+        echo "$(date -u) Computing LD for ~{chrom}:~{start}-~{end}"
+
+        ln -sf ~{psam} ~{plink2_prefix}.psam
+        ln -sf ~{pvar} ~{plink2_prefix}.pvar
+        ln -sf ~{pgen} ~{plink2_prefix}.pgen
+
+        apt-get update -qq && apt-get install -y unzip --quiet
+        unzip ~{plink2_binary}
+
+        ## Extract variants in the locus window
+        ./plink2 \
+            --pfile ~{plink2_prefix} \
+            --chr ~{chrom} \
+            --from-bp ~{start} \
+            --to-bp ~{end} \
+            --keep ~{sample_keep} \
+            --maf 0.001 \
+            --make-pgen \
+            --threads ~{threads} \
+            --out ~{out_prefix}.extracted
+
+        ## Count samples
+        tail -n +2 ~{out_prefix}.extracted.psam | wc -l > n_samples.txt
+
+        ## Compute full symmetric LD matrix (r, not r^2) expected by susie_rss()
+        ./plink2 \
+            --pfile ~{out_prefix}.extracted \
+            --r-unphased square \
+            --threads ~{threads} \
+            --out ~{out_prefix}
+
+        ## Ordered variant IDs matching LD matrix rows/cols
+        awk 'NR>1 {print $3}' ~{out_prefix}.extracted.pvar > ~{out_prefix}.variant_ids.txt
+
+        echo "$(date -u) Done computing LD"
+    >>>
+
+    runtime {
+        docker: "ghcr.io/rgcgithub/regenie/regenie:v4.1.gz"
+        dx_instance_type: "mem2_ssd1_v2_x8"
+    }
+
+    parameter_meta {
+        pgen: { description: "input pgen for LD computation", patterns: ["*.pgen"], stream: true }
+        pvar: { description: "input pvar",                    patterns: ["*.pvar"], stream: true }
+        psam: { description: "input psam",                    patterns: ["*.psam"], stream: true }
+    }
+
+    output {
+        File   ld_matrix   = "~{out_prefix}.unphased.vcor"
+        File   variant_ids = "~{out_prefix}.variant_ids.txt"
+        String n_samples   = read_string("n_samples.txt")
+    }
+}
+
+
+task prepare_locus_sumstats {
+
+    input {
+        File    summary_stats_parquet
+        String  phenotype
+        String  chrom
+        String  start
+        String  end
+        File    variant_ids
+    }
+
+    command <<<
+        set -euo pipefail
+
+        pip install duckdb pandas numpy --quiet
+
+        python3 <<'PYEOF'
+        import duckdb
+        import pandas as pd
+        import numpy as np
+
+        pheno  = "~{phenotype}"
+        chrom  = "~{chrom}"
+        chrom_label = f"chr{chrom}"
+        win_st = int("~{start}")
+        win_en = int("~{end}")
+
+        ld_snps = pd.read_csv("~{variant_ids}", header=None, names=["ID"])
+
+        con = duckdb.connect()
+        window = con.execute(
+            """
+            SELECT
+                ID,
+                CHROM,
+                CAST(POS AS BIGINT) AS POS,
+                ALLELE0,
+                ALLELE1,
+                CAST(BETA AS DOUBLE) AS BETA,
+                CAST(SE AS DOUBLE) AS SE,
+                CAST(A1FREQ AS DOUBLE) AS A1FREQ,
+                CAST(N AS DOUBLE) AS N,
+                CAST(LOG10P AS DOUBLE) AS LOG10P
+            FROM read_parquet(?)
+            WHERE phenotype = ?
+              AND CHROM = ?
+              AND CAST(POS AS BIGINT) BETWEEN ? AND ?
+            """,
+            ["~{summary_stats_parquet}", pheno, chrom_label, win_st, win_en],
+        ).df()
+
+        window["CHROM"] = window["CHROM"].astype(str).str.replace("^chr", "", regex=True)
+        window["POS"]   = window["POS"].astype(int)
+        window["Z"] = window["BETA"].astype(float) / window["SE"].astype(float)
+        window["P"] = 10 ** (-window["LOG10P"].astype(float))
+
+        merged = ld_snps.merge(
+            window[["ID", "CHROM", "POS", "ALLELE0", "ALLELE1",
+                    "BETA", "SE", "Z", "A1FREQ", "N", "LOG10P", "P"]],
+            on="ID",
+            how="left"
+        )
+
+        n_missing = merged["Z"].isna().sum()
+        if n_missing > 0:
+            print(f"WARNING: {n_missing} LD variants have no z-score (set to 0)")
+            merged["Z"] = merged["Z"].fillna(0)
+
+        merged.to_csv("zscore_~{phenotype}_~{chrom}_~{start}_~{end}.tsv", sep="\t", index=False)
+        print(f"Prepared {len(merged)} variants for SuSiE")
+        PYEOF
+    >>>
+
+    runtime {
+        docker: "python:3.11-slim"
+        dx_instance_type: "mem1_ssd1_v2_x2"
+    }
+
+    output {
+        File z_scores_tsv = "zscore_~{phenotype}_~{chrom}_~{start}_~{end}.tsv"
+    }
+}
+
+
+task run_susie {
+
+    input {
+        File    z_scores
+        File    ld_matrix
+        File    variant_ids
+        String  phenotype
+        String  chrom
+        String  start
+        String  end
+        String  index_snp
+        String  n_samples
+        Int     max_causal
+        Float   min_abs_corr
+        Float   coverage
+        Int     max_iter
+        Float   tol
+        Boolean refine
+        Boolean estimate_residual_variance
+        String  docker
+    }
+
+    command <<<
+        set -euo pipefail
+
+        Rscript - <<'REOF'
+
+        if (!requireNamespace("susieR",     quietly = TRUE))
+            install.packages("susieR",     repos = "https://cloud.r-project.org", quiet = TRUE)
+        if (!requireNamespace("data.table", quietly = TRUE))
+            install.packages("data.table", repos = "https://cloud.r-project.org", quiet = TRUE)
+
+        library(susieR)
+        library(data.table)
+
+        phenotype   <- "~{phenotype}"
+        chrom       <- "~{chrom}"
+        locus_start <- "~{start}"
+        locus_end   <- "~{end}"
+        index_snp   <- "~{index_snp}"
+        n           <- as.integer("~{n_samples}")
+        L           <- as.integer("~{max_causal}")
+        min_abs_corr          <- ~{min_abs_corr}
+        coverage              <- ~{coverage}
+        max_iter              <- as.integer("~{max_iter}")
+        tol                   <- ~{tol}
+        refine                <- "~{refine}" == "true"
+        estimate_residual_var <- "~{estimate_residual_variance}" == "true"
+        out_prefix <- paste0("susie_", phenotype, "_", chrom, "_", locus_start, "_", locus_end)
+
+        ## Load z-scores
+        cat(format(Sys.time()), "Loading z-scores\n")
+        zdf  <- fread("~{z_scores}")
+        zvec <- setNames(as.numeric(zdf$Z), zdf$ID)
+
+        ## Load LD matrix
+        ## plink2 --r-unphased square outputs a full symmetric r matrix.
+        cat(format(Sys.time()), "Loading LD matrix\n")
+        R_mat <- as.matrix(fread("~{ld_matrix}", header = FALSE))
+        R_mat <- (R_mat + t(R_mat)) / 2   # enforce exact symmetry
+        diag(R_mat) <- 1.0
+
+        snp_ids <- readLines("~{variant_ids}")
+        rownames(R_mat) <- snp_ids
+        colnames(R_mat) <- snp_ids
+        stopifnot(length(zvec) == nrow(R_mat))
+
+        ## Check LD / z-score consistency (Zou et al. 2022)
+        cat(format(Sys.time()), "Checking z-score / LD consistency\n")
+        tryCatch({
+            check        <- kriging_rss(z = zvec, R = R_mat, n = n)
+            suspect_snps <- rownames(check$conditional_dist)[
+                abs(check$conditional_dist[, "z"]) > 2
+            ]
+            if (length(suspect_snps) > 0)
+                warning(paste("Potentially inconsistent SNPs:", paste(suspect_snps, collapse = ", ")))
+            writeLines(suspect_snps, paste0(out_prefix, ".suspect_snps.txt"))
+        }, error = function(e) {
+            cat("kriging_rss check failed (non-fatal):", conditionMessage(e), "\n")
+            writeLines("check_failed", paste0(out_prefix, ".suspect_snps.txt"))
+        })
+
+        ## Run SuSiE-RSS
+        cat(format(Sys.time()), "Running susie_rss\n")
+        susie_fit <- tryCatch(
+            susie_rss(
+                z                          = zvec,
+                R                          = R_mat,
+                n                          = n,
+                L                          = L,
+                coverage                   = coverage,
+                min_abs_corr               = min_abs_corr,
+                max_iter                   = max_iter,
+                tol                        = tol,
+                refine                     = refine,
+                estimate_residual_variance = estimate_residual_var,
+                verbose                    = TRUE
+            ),
+            error = function(e) { cat("susie_rss failed:", conditionMessage(e), "\n"); NULL }
+        )
+
+        saveRDS(susie_fit, file = paste0(out_prefix, ".rds"))
+
+        ## Extract PIPs
+        pip_vec <- if (!is.null(susie_fit)) susie_fit$pip else rep(NA_real_, length(zvec))
+
+        pip_df <- data.frame(
+            phenotype   = phenotype,
+            chrom       = chrom,
+            locus_start = locus_start,
+            locus_end   = locus_end,
+            index_snp   = index_snp,
+            ID          = names(zvec),
+            Z           = as.numeric(zvec),
+            PIP         = pip_vec
+        )
+        fwrite(pip_df, paste0(out_prefix, ".pip.tsv"), sep = "\t")
+
+        ## Extract credible sets
+        cs_rows <- list()
+        if (!is.null(susie_fit) && !is.null(susie_fit$sets$cs)) {
+            for (cs_name in names(susie_fit$sets$cs)) {
+                idx <- susie_fit$sets$cs[[cs_name]]
+                cs_rows[[cs_name]] <- data.frame(
+                    phenotype    = phenotype,
+                    chrom        = chrom,
+                    locus_start  = locus_start,
+                    locus_end    = locus_end,
+                    index_snp    = index_snp,
+                    credible_set = cs_name,
+                    cs_size      = length(idx),
+                    min_abs_corr = susie_fit$sets$purity[cs_name, "min.abs.corr"],
+                    ID           = names(zvec)[idx],
+                    Z            = zvec[idx],
+                    PIP          = pip_vec[idx]
+                )
+            }
+            cs_df <- rbindlist(cs_rows, fill = TRUE)
+        } else {
+            cs_df <- data.frame(
+                phenotype = character(), chrom = character(),
+                locus_start = character(), locus_end = character(),
+                index_snp = character(), credible_set = character(),
+                cs_size = integer(), min_abs_corr = numeric(),
+                ID = character(), Z = numeric(), PIP = numeric()
+            )
+        }
+        fwrite(cs_df, paste0(out_prefix, ".credible_sets.tsv"), sep = "\t")
+
+        cat(format(Sys.time()), "Done\n")
+        REOF
+    >>>
+
+    runtime {
+        docker: "~{docker}"
+        dx_instance_type: "mem2_ssd1_v2_x4"
+    }
+
+    output {
+        File pip_tsv           = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.pip.tsv"
+        File credible_sets_tsv = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.credible_sets.tsv"
+        File susie_rds         = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.rds"
+        File log               = stdout()
+    }
+}
+
+
+task combine_results {
+
+    input {
+        Array[File] pip_tsvs
+        Array[File] credible_set_tsvs
+    }
+
+    command <<<
+        set -euo pipefail
+
+        pip install pandas --quiet
+
+        python3 <<'PYEOF'
+        import pandas as pd
+
+        pip_files = ["~{sep='", "' pip_tsvs}"]
+        cs_files  = ["~{sep='", "' credible_set_tsvs}"]
+
+        merged_pip = pd.concat(
+            [pd.read_csv(f, sep="\t") for f in pip_files],
+            ignore_index=True
+        ).sort_values(["phenotype", "chrom", "locus_start", "PIP"],
+                      ascending=[True, True, True, False])
+        merged_pip.to_csv("all_loci_pip.tsv", sep="\t", index=False)
+        print(f"Total PIPs written: {len(merged_pip)}")
+
+        cs_dfs    = [d for d in (pd.read_csv(f, sep="\t") for f in cs_files) if len(d) > 0]
+        merged_cs = pd.concat(cs_dfs, ignore_index=True) if cs_dfs else pd.DataFrame()
+        merged_cs.to_csv("all_loci_credible_sets.tsv", sep="\t", index=False)
+        print(f"Total credible set entries written: {len(merged_cs)}")
+        PYEOF
+    >>>
+
+    runtime {
+        docker: "python:3.11-slim"
+        dx_instance_type: "mem2_ssd1_v2_x2"
+    }
+
+    output {
+        File merged_pip           = "all_loci_pip.tsv"
+        File merged_credible_sets = "all_loci_credible_sets.tsv"
+    }
+}
