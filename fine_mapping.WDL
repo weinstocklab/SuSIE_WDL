@@ -20,6 +20,7 @@ workflow susie_finemapping {
 
         ## Fine-mapping parameters 
         Float           p_threshold     = 5e-8   # genome-wide significance
+        Float           min_maf         = 0.001  # minimum minor allele frequency for locus discovery
         Int             window_kb       = 500     # +/- kb around index SNP
         Int             max_causal      = 10      # L parameter in SuSiE
         Float           min_abs_corr    = 0.5     # min |r| for credible sets
@@ -48,6 +49,7 @@ workflow susie_finemapping {
             summary_stats_parquet = summary_stats_parquet,
             step2_chunk_manifest  = step2_chunk_manifest,
             p_threshold           = p_threshold,
+            min_maf               = min_maf,
             window_kb             = window_kb
     }
 
@@ -204,6 +206,7 @@ task identify_loci {
         File    summary_stats_parquet
         File    step2_chunk_manifest
         Float   p_threshold
+        Float   min_maf
         Int     window_kb
     }
 
@@ -219,6 +222,7 @@ task identify_loci {
         import numpy as np
 
         p_thresh  = ~{p_threshold}
+        min_maf   = ~{min_maf}
         window_kb = ~{window_kb}
         log10p_thresh = -np.log10(p_thresh)
 
@@ -230,15 +234,23 @@ task identify_loci {
                 CHROM,
                 CAST(POS AS BIGINT) AS POS,
                 ID,
+                CAST(A1FREQ AS DOUBLE) AS A1FREQ,
                 CAST(LOG10P AS DOUBLE) AS LOG10P
             FROM read_parquet(?)
             WHERE LOG10P >= ?
+              AND least(CAST(A1FREQ AS DOUBLE), 1.0 - CAST(A1FREQ AS DOUBLE)) >= ?
             ORDER BY phenotype, LOG10P DESC, POS ASC
             """,
-            ["~{summary_stats_parquet}", float(log10p_thresh)],
+            ["~{summary_stats_parquet}", float(log10p_thresh), float(min_maf)],
         ).df()
 
-        sig["CHROM"] = sig["CHROM"].astype(str).str.replace("^chr", "", regex=True)
+        sig["CHROM"] = (
+            sig["CHROM"]
+            .astype(str)
+            .str.replace("^chr", "", regex=True)
+            .str.upper()
+            .replace({"23": "X"})
+        )
         sig["POS"] = sig["POS"].astype(int)
 
         loci = []
@@ -345,7 +357,13 @@ task identify_loci {
             raise ValueError(f"step2_chunk_manifest is missing columns: {missing_cols}")
 
         manifest = manifest.copy()
-        manifest["chrom"] = manifest["chrom"].astype(str).str.replace("^chr", "", regex=True)
+        manifest["chrom"] = (
+            manifest["chrom"]
+            .astype(str)
+            .str.replace("^chr", "", regex=True)
+            .str.upper()
+            .replace({"23": "X"})
+        )
         has_windows = {"start", "end"}.issubset(manifest.columns)
         if has_windows:
             manifest["start"] = manifest["start"].astype(int)
@@ -508,8 +526,7 @@ task prepare_locus_sumstats {
         import numpy as np
 
         pheno  = "~{phenotype}"
-        chrom  = "~{chrom}"
-        chrom_label = f"chr{chrom}"
+        chrom  = "~{chrom}".upper()
         win_st = int("~{start}")
         win_en = int("~{end}")
 
@@ -531,13 +548,19 @@ task prepare_locus_sumstats {
                 CAST(LOG10P AS DOUBLE) AS LOG10P
             FROM read_parquet(?)
             WHERE phenotype = ?
-              AND CHROM = ?
+              AND replace(upper(CHROM), 'CHR', '') IN (?, ?)
               AND CAST(POS AS BIGINT) BETWEEN ? AND ?
             """,
-            ["~{summary_stats_parquet}", pheno, chrom_label, win_st, win_en],
+            ["~{summary_stats_parquet}", pheno, chrom, "23" if chrom == "X" else chrom, win_st, win_en],
         ).df()
 
-        window["CHROM"] = window["CHROM"].astype(str).str.replace("^chr", "", regex=True)
+        window["CHROM"] = (
+            window["CHROM"]
+            .astype(str)
+            .str.replace("^chr", "", regex=True)
+            .str.upper()
+            .replace({"23": "X"})
+        )
         window["POS"]   = window["POS"].astype(int)
         window["Z"] = window["BETA"].astype(float) / window["SE"].astype(float)
         window["P"] = 10 ** (-window["LOG10P"].astype(float))

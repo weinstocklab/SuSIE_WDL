@@ -18,6 +18,7 @@ inputs:
   covariates_file: "file-zzzz"
   plink2_binary: "file-aaaa"
   p_threshold: 5e-8
+  min_maf: 0.001
   window_kb: 500
   max_causal: 10
   min_abs_corr: 0.5
