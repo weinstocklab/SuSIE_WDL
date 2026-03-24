@@ -193,19 +193,38 @@ task extract_sample_keep {
                 "covariates_file must contain an IID or EID column in the header"
             )
 
-        sample_ids = (
-            df[sample_col]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-        )
-        sample_ids = sample_ids[sample_ids != ""].drop_duplicates()
+        def clean_series(series):
+            out = series.fillna("").astype(str).str.strip()
+            out = out[out != ""]
+            return out
 
-        keep_df = pd.DataFrame({"#IID": sample_ids})
-        keep_df.to_csv("sample_keep.tsv", sep="\t", index=False)
+        iid_series = clean_series(df[normalized["IID"]]).drop_duplicates() if "IID" in normalized else pd.Series(dtype=str)
+        eid_series = clean_series(df[normalized["EID"]]).drop_duplicates() if "EID" in normalized else pd.Series(dtype=str)
 
-        print(f"Derived sample keep file from column: {sample_col}")
-        print(f"Samples retained: {len(keep_df)}")
+        if "FID" in normalized and "IID" in normalized:
+            fid_iid = pd.DataFrame({
+                "FID": clean_series(df[normalized["FID"]]),
+                "IID": clean_series(df[normalized["IID"]]),
+            })
+            fid_iid = fid_iid[(fid_iid["FID"] != "") & (fid_iid["IID"] != "")]
+            fid_iid = fid_iid.drop_duplicates()
+            if fid_iid.empty:
+                raise ValueError("covariates_file has FID/IID headers but no non-empty rows")
+            fid_iid.to_csv("sample_keep.tsv", sep="\t", index=False, header=False)
+            strategy = "FID+IID"
+        elif not iid_series.empty:
+            iid_series.to_frame(name="IID").to_csv("sample_keep.tsv", sep="\t", index=False, header=False)
+            strategy = "IID"
+        elif not eid_series.empty:
+            eid_series.to_frame(name="IID").to_csv("sample_keep.tsv", sep="\t", index=False, header=False)
+            strategy = "EID"
+        else:
+            raise ValueError("covariates_file must contain at least one non-empty IID or EID value")
+
+        print(f"Derived PLINK keep file using strategy: {strategy}")
+        print(f"Detected IID column: {'IID' in normalized}")
+        print(f"Detected EID column: {'EID' in normalized}")
+        print(f"Detected FID column: {'FID' in normalized}")
         PYEOF
     >>>
 
@@ -489,19 +508,33 @@ task compute_ld {
             --threads ~{threads} \
             --out ~{out_prefix}.extracted
 
-        ## Count samples
-        tail -n +2 ~{out_prefix}.extracted.psam | wc -l > n_samples.txt
-
-        ## Compute full symmetric LD matrix (r, not r^2) expected by susie_rss()
-        ./plink2 \
-            --pfile ~{out_prefix}.extracted \
-            --no-pheno \
-            --r-unphased square \
-            --threads ~{threads} \
-            --out ~{out_prefix}
+        sample_count=$(tail -n +2 ~{out_prefix}.extracted.psam | wc -l)
+        if [[ "${sample_count}" -eq 0 ]]; then
+            echo "No samples remaining after sample/MAF/window filters" >&2
+            exit 13
+        fi
+        printf "%s\n" "${sample_count}" > n_samples.txt
 
         ## Ordered variant IDs matching LD matrix rows/cols
         awk 'NR>1 {print $3}' ~{out_prefix}.extracted.pvar > ~{out_prefix}.variant_ids.txt
+
+        variant_count=$(wc -l < ~{out_prefix}.variant_ids.txt)
+        echo "$(date -u) Variants retained after filtering: ${variant_count}"
+
+        if [[ "${variant_count}" -eq 0 ]]; then
+            echo "No variants remaining in locus after sample/MAF/window filters" >&2
+            exit 14
+        elif [[ "${variant_count}" -eq 1 ]]; then
+            printf "1\n" > ~{out_prefix}.unphased.vcor
+        else
+            ## Compute full symmetric LD matrix (r, not r^2) expected by susie_rss()
+            ./plink2 \
+                --pfile ~{out_prefix}.extracted \
+                --no-pheno \
+                --r-unphased square \
+                --threads ~{threads} \
+                --out ~{out_prefix}
+        fi
 
         echo "$(date -u) Done computing LD"
     >>>
