@@ -537,6 +537,10 @@ task compute_ld {
                 --threads ~{threads} \
                 --out ~{out_prefix}
 
+            if [[ ! -e "~{out_prefix}.unphased.vcor" && -e "~{out_prefix}.unphased.vcor1" ]]; then
+                mv "~{out_prefix}.unphased.vcor1" "~{out_prefix}.unphased.vcor"
+            fi
+
             if [[ -s "~{out_prefix}.unphased.vcor" ]]; then
                 printf "plink_generated\n" > ld_status.txt
             else
