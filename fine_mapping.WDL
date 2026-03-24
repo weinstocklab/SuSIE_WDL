@@ -9,13 +9,14 @@ workflow susie_finemapping {
         ## Concatenated REGENIE output parquet with all phenotypes included.
         File            summary_stats_parquet
 
-        ## Genotype files for LD computation 
-        ## same step2 chunk manifest used in REGENIE
+        ## Genotype files for LD computation.
+        ## Accepts the REGENIE step2 chunk manifest or step2 chromosome manifest.
        
         File            step2_chunk_manifest
 
-        ## Sample / variant filters 
-        File            sample_keep_file
+        ## GWAS covariates file used to define the analysis sample.
+        ## The workflow extracts IID/EID and builds a PLINK keep file internally.
+        File            covariates_file
 
         ## Fine-mapping parameters 
         Float           p_threshold     = 5e-8   # genome-wide significance
@@ -36,7 +37,11 @@ workflow susie_finemapping {
         String          r_docker    = "rocker/r-ver:4.3.0"
     }
 
-    
+    call extract_sample_keep {
+        input:
+            covariates_file = covariates_file
+    }
+
     ## Step 1: Identify significant loci per phenotype.
     call identify_loci {
         input:
@@ -74,7 +79,7 @@ workflow susie_finemapping {
                 chrom         = locus_chrom,
                 start         = locus_start,
                 end           = locus_end,
-                sample_keep   = sample_keep_file,
+                sample_keep   = extract_sample_keep.sample_keep_file,
                 out_prefix    = "ld_~{locus_chrom}_~{locus_start}_~{locus_end}_~{locus_phenotype}",
                 threads       = threads
         }
@@ -133,6 +138,66 @@ workflow susie_finemapping {
 
 ## TASKS
 
+task extract_sample_keep {
+
+    input {
+        File covariates_file
+    }
+
+    command <<<
+        set -euo pipefail
+
+        python3 -m venv .venv
+        .venv/bin/pip install pandas --quiet
+
+        .venv/bin/python <<'PYEOF'
+        import pandas as pd
+
+        df = pd.read_csv("~{covariates_file}", sep=None, engine="python", dtype=str)
+
+        normalized = {}
+        for col in df.columns:
+            key = col.strip().lstrip("#").upper()
+            normalized[key] = col
+
+        sample_col = None
+        for candidate in ("IID", "EID"):
+            if candidate in normalized:
+                sample_col = normalized[candidate]
+                break
+
+        if sample_col is None:
+            raise ValueError(
+                "covariates_file must contain an IID or EID column in the header"
+            )
+
+        sample_ids = (
+            df[sample_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        sample_ids = sample_ids[sample_ids != ""].drop_duplicates()
+
+        keep_df = pd.DataFrame({"#IID": sample_ids})
+        keep_df.to_csv("sample_keep.tsv", sep="\t", index=False)
+
+        print(f"Derived sample keep file from column: {sample_col}")
+        print(f"Samples retained: {len(keep_df)}")
+        PYEOF
+    >>>
+
+    runtime {
+        docker: "python:3.11-slim"
+        dx_instance_type: "mem1_ssd1_v2_x2"
+    }
+
+    output {
+        File sample_keep_file = "sample_keep.tsv"
+    }
+}
+
+
 task identify_loci {
 
     input {
@@ -145,9 +210,10 @@ task identify_loci {
     command <<<
         set -euo pipefail
 
-        pip install duckdb pandas numpy --quiet
+        python3 -m venv .venv
+        .venv/bin/pip install duckdb pandas numpy --quiet
 
-        python3 <<'PYEOF'
+        .venv/bin/python <<'PYEOF'
         import duckdb
         import pandas as pd
         import numpy as np
@@ -218,23 +284,72 @@ task identify_loci {
             ],
         )
 
-        manifest = pd.read_csv("~{step2_chunk_manifest}", sep="\t")
+        manifest = pd.read_csv("~{step2_chunk_manifest}", sep="\t", dtype=str)
         required_cols = [
             "chrom",
-            "start",
-            "end",
             "plink2_chrom_pvar",
             "plink2_chrom_psam",
             "plink2_chrom_pgen",
         ]
+        has_required_cols = set(required_cols).issubset(manifest.columns)
+
+        if not has_required_cols:
+            probe = pd.read_csv("~{step2_chunk_manifest}", sep="\t", header=None, dtype=str)
+
+            if probe.shape[1] == 10:
+                manifest = pd.read_csv(
+                    "~{step2_chunk_manifest}",
+                    sep="\t",
+                    header=None,
+                    names=[
+                        "chrom",
+                        "start",
+                        "end",
+                        "range",
+                        "plink2_chrom_pvar_name",
+                        "plink2_chrom_psam_name",
+                        "plink2_chrom_pgen_name",
+                        "plink2_chrom_pvar",
+                        "plink2_chrom_psam",
+                        "plink2_chrom_pgen",
+                    ],
+                    dtype=str,
+                )
+            elif probe.shape[1] == 7:
+                manifest = pd.read_csv(
+                    "~{step2_chunk_manifest}",
+                    sep="\t",
+                    header=None,
+                    names=[
+                        "chrom",
+                        "plink2_chrom_pvar_name",
+                        "plink2_chrom_psam_name",
+                        "plink2_chrom_pgen_name",
+                        "plink2_chrom_pvar",
+                        "plink2_chrom_psam",
+                        "plink2_chrom_pgen",
+                    ],
+                    dtype=str,
+                )
+            else:
+                raise ValueError(
+                    "step2_chunk_manifest must be either a 10-column chunk manifest "
+                    "or a 7-column chromosome manifest"
+                )
+
+        if not manifest.empty and str(manifest.iloc[0]["chrom"]).strip().lower() == "chrom":
+            manifest = manifest.iloc[1:].copy()
+
         missing_cols = [c for c in required_cols if c not in manifest.columns]
         if missing_cols:
             raise ValueError(f"step2_chunk_manifest is missing columns: {missing_cols}")
 
-        manifest = manifest[required_cols].copy()
+        manifest = manifest.copy()
         manifest["chrom"] = manifest["chrom"].astype(str).str.replace("^chr", "", regex=True)
-        manifest["start"] = manifest["start"].astype(int)
-        manifest["end"] = manifest["end"].astype(int)
+        has_windows = {"start", "end"}.issubset(manifest.columns)
+        if has_windows:
+            manifest["start"] = manifest["start"].astype(int)
+            manifest["end"] = manifest["end"].astype(int)
 
         if loci_df.empty:
             merged = pd.DataFrame(columns=[
@@ -251,11 +366,15 @@ task identify_loci {
         else:
             rows = []
             for locus in loci_df.to_dict(orient="records"):
-                matches = manifest[
-                    (manifest["chrom"] == locus["chrom"])
-                    & (manifest["start"] <= locus["pos"])
-                    & (manifest["end"] >= locus["pos"])
-                ]
+                if has_windows:
+                    matches = manifest[
+                        (manifest["chrom"] == locus["chrom"])
+                        & (manifest["start"] <= locus["pos"])
+                        & (manifest["end"] >= locus["pos"])
+                    ]
+                else:
+                    matches = manifest[manifest["chrom"] == locus["chrom"]]
+
                 if matches.empty:
                     raise ValueError(
                         f"No step2 manifest row covers {locus['chrom']}:{locus['pos']} "
@@ -380,9 +499,10 @@ task prepare_locus_sumstats {
     command <<<
         set -euo pipefail
 
-        pip install duckdb pandas numpy --quiet
+        python3 -m venv .venv
+        .venv/bin/pip install duckdb pandas numpy --quiet
 
-        python3 <<'PYEOF'
+        .venv/bin/python <<'PYEOF'
         import duckdb
         import pandas as pd
         import numpy as np
@@ -627,9 +747,10 @@ task combine_results {
     command <<<
         set -euo pipefail
 
-        pip install pandas --quiet
+        python3 -m venv .venv
+        .venv/bin/pip install pandas --quiet
 
-        python3 <<'PYEOF'
+        .venv/bin/python <<'PYEOF'
         import pandas as pd
 
         pip_files = ["~{sep='", "' pip_tsvs}"]
