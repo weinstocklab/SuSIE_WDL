@@ -878,16 +878,26 @@ task plot_locus {
         p_threshold <- ~{p_threshold}
         out_prefix <- paste0("locuszoom_", phenotype, "_", chrom, "_", locus_start, "_", locus_end)
 
-        zdf <- fread("~{z_scores}")
-        pip_df <- fread("~{pip_tsv}")
+        zdf <- as.data.table(fread("~{z_scores}"))
+        pip_df <- as.data.table(fread("~{pip_tsv}"))
 
         cs_df <- if (file.exists("~{credible_sets_tsv}") && file.info("~{credible_sets_tsv}")$size > 0) {
-            fread("~{credible_sets_tsv}")
+            as.data.table(fread("~{credible_sets_tsv}"))
         } else {
             data.table(ID = character(), credible_set = character())
         }
 
-        variant_ids <- readLines("~{variant_ids}")
+        if (!"ID" %in% names(zdf)) stop("z_scores is missing ID column")
+        if (!"ID" %in% names(pip_df)) stop("pip_tsv is missing ID column")
+        if (!"PIP" %in% names(pip_df)) pip_df[, PIP := NA_real_]
+        if (!"ID" %in% names(cs_df)) cs_df[, ID := character()]
+        if (!"credible_set" %in% names(cs_df)) cs_df[, credible_set := character()]
+
+        zdf[, ID := as.character(ID)]
+        pip_df[, `:=`(ID = as.character(ID), PIP = as.numeric(PIP))]
+        cs_df[, `:=`(ID = as.character(ID), credible_set = as.character(credible_set))]
+
+        variant_ids <- as.character(readLines("~{variant_ids}"))
         R_mat <- as.matrix(fread("~{ld_matrix}", header = FALSE))
         rownames(R_mat) <- variant_ids
         colnames(R_mat) <- variant_ids
