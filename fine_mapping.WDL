@@ -1053,10 +1053,10 @@ task plot_locus {
             exon_height <- 0.4
             track_spacing <- 0.6
 
+            genes[, y_center := (track - 1) * track_spacing]
             genes[, `:=`(
-                y_center = (track - 1) * track_spacing,
-                y_min = y_center - gene_body_height / 2,
-                y_max = y_center + gene_body_height / 2,
+                y_min   = y_center - gene_body_height / 2,
+                y_max   = y_center + gene_body_height / 2,
                 label_y = y_center + exon_height / 2 + 0.1
             )]
 
