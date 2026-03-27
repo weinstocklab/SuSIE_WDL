@@ -152,6 +152,11 @@ workflow susie_finemapping {
             credible_set_tsvs = run_susie.credible_sets_tsv
     }
 
+    call check_indel_pass {
+        input:
+            loci_manifest = identify_loci.loci_manifest
+    }
+
     output {
         File          merged_pip           = combine_results.merged_pip
         File          merged_credible_sets = combine_results.merged_credible_sets
@@ -159,6 +164,7 @@ workflow susie_finemapping {
         Array[File]   susie_logs           = run_susie.log
         Array[File]   susie_excluded_snps  = run_susie.excluded_snps_tsv
         Array[File]   susie_diagnostics    = run_susie.diagnostics_txt
+        File          indel_pass_summary   = check_indel_pass.indel_summary
         Array[File]   locuszoom_pdfs       = plot_locus.plot_pdf
         Array[File]   locuszoom_pngs       = plot_locus.plot_png
         Array[File]   locuszoom_plot_data  = plot_locus.plot_data_tsv
@@ -585,7 +591,7 @@ task compute_ld {
 
     runtime {
         docker: "ghcr.io/rgcgithub/regenie/regenie:v4.1.gz"
-        dx_instance_type: "mem2_ssd1_v2_x8"
+        dx_instance_type: "mem1_ssd1_v2_x4"
     }
 
     parameter_meta {
@@ -1086,7 +1092,7 @@ task run_susie {
 
     runtime {
         docker: "~{docker}"
-        dx_instance_type: "mem2_ssd1_v2_x4"
+        dx_instance_type: "mem2_ssd1_v2_x8"
     }
 
     output {
@@ -1454,5 +1460,97 @@ task combine_results {
     output {
         File merged_pip           = "all_loci_pip.tsv"
         File merged_credible_sets = "all_loci_credible_sets.tsv"
+    }
+}
+
+task check_indel_pass {
+    input {
+        File loci_manifest
+    }
+    command <<<
+        set -euo pipefail
+        python3 -m venv .venv
+        .venv/bin/pip install pandas dxpy --quiet
+
+        .venv/bin/python3 - <<'PYEOF'
+import pandas as pd
+import subprocess
+import os
+
+loci = pd.read_csv("~{loci_manifest}", sep="\t")
+os.makedirs("indel_pass_results", exist_ok=True)
+
+summary_rows = []
+downloaded = {}
+
+for _, row in loci.iterrows():
+    chrom    = str(row["chrom"]).replace("chr", "")
+    pos      = int(row["pos"])
+    locus_id = f"chr{chrom}_{pos}"
+    pvar_dx  = str(row["pvar_dx_path"])
+    window   = 10000
+    start    = max(0, pos - window)
+    end      = pos + window
+
+    if chrom not in downloaded:
+        local_pvar = f"chr{chrom}.pvar"
+        print(f"Downloading pvar for chr{chrom} from {pvar_dx}...")
+        ret = subprocess.run(
+            ["dx", "download", pvar_dx, "-o", local_pvar],
+            capture_output=True, text=True
+        )
+        if ret.returncode != 0:
+            print(f"  WARNING: could not download {pvar_dx}: {ret.stderr.strip()}")
+            downloaded[chrom] = None
+        else:
+            downloaded[chrom] = local_pvar
+    local_pvar = downloaded[chrom]
+
+    if not local_pvar or not os.path.exists(local_pvar):
+        summary_rows.append({"locus": locus_id, "chrom": chrom,
+                             "pos": pos, "verdict_flags": "NO_FILE"})
+        continue
+
+    result = subprocess.run(
+        f"grep -v '^#' {local_pvar} | awk -v s={start} -v e={end} '$2+0>=s && $2+0<=e'",
+        shell=True, capture_output=True, text=True
+    )
+    lines = [l.split("\t") for l in result.stdout.strip().split("\n") if l]
+
+    flags     = []
+    multi     = sum(1 for l in lines if len(l) > 4 and "," in l[4])
+    indels    = sum(1 for l in lines if len(l) > 4
+                    and abs(int(l[1]) - pos) <= 1000 and len(l[4]) > 50)
+    exact     = [l for l in lines if len(l) > 1 and int(l[1]) == pos]
+    n_alleles = len(exact)
+
+    if multi     > 0: flags.append("MULTIALLELIC_NEARBY")
+    if indels    > 0: flags.append("LONG_INDEL_NEARBY")
+    if n_alleles > 1: flags.append("MULTIPLE_ROWS_AT_POS")
+
+    summary_rows.append({
+        "locus":                   locus_id,
+        "chrom":                   chrom,
+        "pos":                     pos,
+        "n_alleles_at_pos":        n_alleles,
+        "multiallelic_count_10kb": multi,
+        "long_indel_nearby":       indels > 0,
+        "variant_density_10kb":    len(lines),
+        "verdict_flags":           ";".join(flags) or "NONE"
+    })
+    print(f"  {locus_id} -> {';'.join(flags) or 'NONE'}")
+
+pd.DataFrame(summary_rows).to_csv(
+    "indel_pass_results/indel_pass_summary.tsv", sep="\t", index=False
+)
+print(f"Done. Wrote {len(summary_rows)} loci.")
+PYEOF
+    >>>
+    output {
+        File indel_summary = "indel_pass_results/indel_pass_summary.tsv"
+    }
+    runtime {
+        docker: "python3.11-slim"
+        dx_instance_type: "mem1_ssd1_v2_x2"
     }
 }
