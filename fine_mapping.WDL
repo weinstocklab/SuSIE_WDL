@@ -94,7 +94,8 @@ workflow susie_finemapping {
                 chrom                 = locus_chrom,
                 start                 = locus_start,
                 end                   = locus_end,
-                variant_ids           = compute_ld.variant_ids
+                variant_ids           = compute_ld.variant_ids,
+                ld_variants_pvar      = compute_ld.extracted_pvar
         }
 
         ## 4. Run SuSiE
@@ -150,6 +151,8 @@ workflow susie_finemapping {
         File          merged_credible_sets = combine_results.merged_credible_sets
         Array[File]   susie_rds_all        = run_susie.susie_rds
         Array[File]   susie_logs           = run_susie.log
+        Array[File]   susie_excluded_snps  = run_susie.excluded_snps_tsv
+        Array[File]   susie_diagnostics    = run_susie.diagnostics_txt
         Array[File]   locuszoom_pdfs       = plot_locus.plot_pdf
         Array[File]   locuszoom_pngs       = plot_locus.plot_png
         Array[File]   locuszoom_plot_data  = plot_locus.plot_data_tsv
@@ -574,6 +577,7 @@ task compute_ld {
     output {
         File   ld_matrix   = "~{out_prefix}.unphased.vcor"
         File   variant_ids = "~{out_prefix}.variant_ids.txt"
+        File   extracted_pvar = "~{out_prefix}.extracted.pvar"
         String n_samples   = read_string("n_samples.txt")
         String ld_status   = read_string("ld_status.txt")
     }
@@ -589,6 +593,7 @@ task prepare_locus_sumstats {
         String  start
         String  end
         File    variant_ids
+        File    ld_variants_pvar
     }
 
     command <<<
@@ -607,7 +612,15 @@ task prepare_locus_sumstats {
         win_st = int("~{start}")
         win_en = int("~{end}")
 
-        ld_snps = pd.read_csv("~{variant_ids}", header=None, names=["ID"])
+        ld_snps = pd.read_csv("~{variant_ids}", header=None, names=["ID"], dtype=str)
+        ld_pvar = pd.read_csv("~{ld_variants_pvar}", sep="\t", dtype=str)
+        if "#CHROM" in ld_pvar.columns:
+            ld_pvar = ld_pvar.rename(columns={"#CHROM": "CHROM"})
+        required_pvar_cols = {"CHROM", "POS", "ID", "REF", "ALT"}
+        missing_pvar_cols = required_pvar_cols - set(ld_pvar.columns)
+        if missing_pvar_cols:
+            raise ValueError(f"ld_variants_pvar is missing columns: {sorted(missing_pvar_cols)}")
+        ld_pvar = ld_pvar[["CHROM", "POS", "ID", "REF", "ALT"]].copy()
 
         con = duckdb.connect()
         window = con.execute(
@@ -638,21 +651,119 @@ task prepare_locus_sumstats {
             .str.upper()
             .replace({"23": "X"})
         )
-        window["POS"]   = window["POS"].astype(int)
-        window["Z"] = window["BETA"].astype(float) / window["SE"].astype(float)
+        window["POS"] = window["POS"].astype(int)
+        window["ID"] = window["ID"].astype(str)
+        window["ALLELE0"] = window["ALLELE0"].astype(str).str.upper()
+        window["ALLELE1"] = window["ALLELE1"].astype(str).str.upper()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            window["Z"] = window["BETA"].astype(float) / window["SE"].astype(float)
+        window.loc[~np.isfinite(window["Z"]), "Z"] = np.nan
         window["P"] = 10 ** (-window["LOG10P"].astype(float))
 
-        merged = ld_snps.merge(
-            window[["ID", "CHROM", "POS", "ALLELE0", "ALLELE1",
-                    "BETA", "SE", "Z", "A1FREQ", "N", "LOG10P", "P"]],
-            on="ID",
-            how="left"
+        ld_pvar["CHROM"] = (
+            ld_pvar["CHROM"]
+            .astype(str)
+            .str.replace("^chr", "", regex=True)
+            .str.upper()
+            .replace({"23": "X"})
+        )
+        ld_pvar["POS"] = ld_pvar["POS"].astype(int)
+        ld_pvar["ID"] = ld_pvar["ID"].astype(str)
+        ld_pvar["REF"] = ld_pvar["REF"].astype(str).str.upper()
+        ld_pvar["ALT"] = ld_pvar["ALT"].astype(str).str.upper()
+
+        def normalize_variant_id(series):
+            return (
+                series.fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .str.replace("^CHR", "", regex=True)
+                .str.replace(r"[-_/]", ":", regex=True)
+            )
+
+        def unordered_allele_key(a, b):
+            a = a.fillna("").astype(str).str.upper()
+            b = b.fillna("").astype(str).str.upper()
+            left = a.where(a <= b, b)
+            right = b.where(a <= b, a)
+            return left + ":" + right
+
+        ld_pvar["norm_id"] = normalize_variant_id(ld_pvar["ID"])
+        ld_pvar["coord_alleles"] = (
+            ld_pvar["CHROM"].astype(str)
+            + ":"
+            + ld_pvar["POS"].astype(str)
+            + ":"
+            + unordered_allele_key(ld_pvar["REF"], ld_pvar["ALT"])
         )
 
-        n_missing = merged["Z"].isna().sum()
+        window["norm_id"] = normalize_variant_id(window["ID"])
+        window["coord_alleles"] = (
+            window["CHROM"].astype(str)
+            + ":"
+            + window["POS"].astype(str)
+            + ":"
+            + unordered_allele_key(window["ALLELE0"], window["ALLELE1"])
+        )
+        print(f"Window summary-stat rows in locus: {len(window)}")
+
+        ss_cols = [
+            "ID", "norm_id", "coord_alleles", "CHROM", "POS", "ALLELE0", "ALLELE1",
+            "BETA", "SE", "Z", "A1FREQ", "N", "LOG10P", "P"
+        ]
+        by_id = ld_pvar.merge(
+            window[ss_cols],
+            on="norm_id",
+            how="left",
+            suffixes=("", "_ss"),
+        )
+        n_id_matches = by_id["Z"].notna().sum()
+
+        unmatched = by_id["Z"].isna()
+        by_coord = ld_pvar.loc[unmatched].merge(
+            window[ss_cols],
+            on="coord_alleles",
+            how="left",
+            suffixes=("", "_ss"),
+        )
+        if not by_coord.empty:
+            by_coord = by_coord.drop(columns=["norm_id_ss"], errors="ignore")
+            for col in by_coord.columns:
+                by_id.loc[unmatched, col] = by_coord[col].values
+        n_coord_matches = by_coord["Z"].notna().sum() if not by_coord.empty else 0
+
+        merged = ld_snps.merge(
+            by_id[[
+                "ID", "CHROM_ss", "POS_ss", "ALLELE0", "ALLELE1",
+                "BETA", "SE", "Z", "A1FREQ", "N", "LOG10P", "P", "REF", "ALT"
+            ]].rename(columns={"CHROM_ss": "CHROM", "POS_ss": "POS"}),
+            on="ID",
+            how="left",
+        )
+
+        same_orientation = (merged["ALLELE0"] == merged["REF"]) & (merged["ALLELE1"] == merged["ALT"])
+        flipped_orientation = (merged["ALLELE0"] == merged["ALT"]) & (merged["ALLELE1"] == merged["REF"])
+        needs_flip = flipped_orientation & ~same_orientation
+        allele_mismatch = ~(same_orientation | flipped_orientation) & merged["Z"].notna()
+        merged.loc[needs_flip, "Z"] = -merged.loc[needs_flip, "Z"]
+        merged.loc[allele_mismatch, "Z"] = np.nan
+        merged.loc[allele_mismatch, "BETA"] = np.nan
+        merged = merged.drop(columns=["REF", "ALT"])
+
+        n_flipped = needs_flip.sum()
+        n_allele_mismatch = allele_mismatch.sum()
+        print(
+            f"Summary-stat matching: "
+            f"id_matches={int(n_id_matches)} "
+            f"coord_allele_matches={int(n_coord_matches)} "
+            f"flipped={int(n_flipped)} "
+            f"allele_mismatch={int(n_allele_mismatch)}"
+        )
+
+        n_missing = (~np.isfinite(merged["Z"])).sum()
         if n_missing > 0:
-            print(f"WARNING: {n_missing} LD variants have no z-score (set to 0)")
-            merged["Z"] = merged["Z"].fillna(0)
+            print(f"WARNING: {n_missing} LD variants have missing/non-finite z-scores")
 
         merged.to_csv("zscore_~{phenotype}_~{chrom}_~{start}_~{end}.tsv", sep="\t", index=False)
         print(f"Prepared {len(merged)} variants for SuSiE")
@@ -719,26 +830,129 @@ task run_susie {
         refine                <- "~{refine}" == "true"
         estimate_residual_var <- "~{estimate_residual_variance}" == "true"
         out_prefix <- paste0("susie_", phenotype, "_", chrom, "_", locus_start, "_", locus_end)
+        diagnostics_file <- paste0(out_prefix, ".diagnostics.txt")
+        log_diag <- function(...) {
+            msg <- paste(..., collapse = " ")
+            cat(format(Sys.time()), msg, "\n")
+            cat(format(Sys.time()), msg, "\n", file = diagnostics_file, append = TRUE)
+        }
 
         ## Load z-scores
-        cat(format(Sys.time()), "Loading z-scores\n")
+        log_diag("Loading z-scores")
         zdf  <- fread("~{z_scores}")
-        zvec <- setNames(as.numeric(zdf$Z), zdf$ID)
+        z_all <- setNames(as.numeric(zdf$Z), zdf$ID)
+        log_diag("Loaded", length(z_all), "z-scores")
 
         ## Load LD matrix
         ## plink2 --r-unphased square outputs a full symmetric r matrix.
-        cat(format(Sys.time()), "Loading LD matrix\n")
-        R_mat <- as.matrix(fread("~{ld_matrix}", header = FALSE))
-        R_mat <- (R_mat + t(R_mat)) / 2   # enforce exact symmetry
-        diag(R_mat) <- 1.0
-
         snp_ids <- readLines("~{variant_ids}")
+        log_diag("Loading LD matrix for", length(snp_ids), "variant IDs")
+        raw_ld <- fread("~{ld_matrix}", header = FALSE, data.table = FALSE, fill = TRUE)
+        log_diag("Raw LD table dimensions:", nrow(raw_ld), "rows x", ncol(raw_ld), "cols")
+
+        if (ncol(raw_ld) == length(snp_ids) + 1) {
+            first_col <- as.character(raw_ld[[1]])
+            first_num <- suppressWarnings(as.integer(first_col))
+            if (all(!is.na(first_num)) && identical(first_num, seq_len(length(first_num)))) {
+                log_diag("Dropping leading numeric index column from LD matrix")
+                raw_ld <- raw_ld[, -1, drop = FALSE]
+            } else if (length(first_col) == length(snp_ids) && all(first_col == snp_ids)) {
+                log_diag("Dropping leading variant ID column from LD matrix")
+                raw_ld <- raw_ld[, -1, drop = FALSE]
+            }
+        }
+
+        if (nrow(raw_ld) != length(snp_ids) || ncol(raw_ld) != length(snp_ids)) {
+            log_diag(
+                "LD matrix dimension mismatch after preprocessing:",
+                "rows =", nrow(raw_ld),
+                "cols =", ncol(raw_ld),
+                "expected =", length(snp_ids)
+            )
+            stop(
+                sprintf(
+                    "LD matrix shape mismatch: got %d x %d for %d variant IDs",
+                    nrow(raw_ld), ncol(raw_ld), length(snp_ids)
+                )
+            )
+        }
+
+        R_mat <- as.matrix(data.frame(lapply(raw_ld, as.numeric), check.names = FALSE))
+        storage.mode(R_mat) <- "double"
         rownames(R_mat) <- snp_ids
         colnames(R_mat) <- snp_ids
-        stopifnot(length(zvec) == nrow(R_mat))
+        if (length(z_all) != nrow(R_mat)) {
+            log_diag(
+                "z-score / LD dimension mismatch:",
+                "z =", length(z_all),
+                "ld_rows =", nrow(R_mat)
+            )
+            stop(
+                sprintf(
+                    "z-score / LD dimension mismatch: %d z-scores vs %d LD rows",
+                    length(z_all), nrow(R_mat)
+                )
+            )
+        }
+
+        ## Sanitize and subset to SNPs with finite z and fully finite LD rows/cols.
+        bad_z <- !is.finite(z_all)
+        bad_ld_entry <- !is.finite(R_mat)
+        bad_ld_snp <- apply(bad_ld_entry, 1, any) | apply(bad_ld_entry, 2, any)
+        log_diag(
+            "Initial non-finite counts:",
+            "z =", sum(bad_z),
+            "ld_entries =", sum(bad_ld_entry),
+            "ld_rows =", sum(bad_ld_snp)
+        )
+
+        R_mat <- (R_mat + t(R_mat)) / 2   # enforce exact symmetry
+        ld_oob <- abs(R_mat) > (1 + 1e-8)
+        ld_oob[is.na(ld_oob)] <- FALSE
+        if (any(ld_oob)) {
+            log_diag(
+                "Clipping", sum(ld_oob),
+                "LD entries outside [-1,1]; max abs before clip =",
+                max(abs(R_mat[ld_oob]))
+            )
+            R_mat[R_mat > 1] <- 1
+            R_mat[R_mat < -1] <- -1
+        }
+        diag(R_mat) <- 1.0
+
+        keep_snps <- !(bad_z | bad_ld_snp)
+        n_bad_z <- sum(bad_z)
+        n_bad_ld_snp <- sum(bad_ld_snp)
+        n_kept <- sum(keep_snps)
+        log_diag(
+            "SuSiE SNP filtering:",
+            "total =", length(keep_snps),
+            "nonfinite_z =", n_bad_z,
+            "nonfinite_ld_rows =", n_bad_ld_snp,
+            "kept =", n_kept
+        )
+
+        excluded_df <- data.frame(
+            ID = names(z_all),
+            exclude_nonfinite_z = bad_z,
+            exclude_nonfinite_ld = bad_ld_snp,
+            kept_for_susie = keep_snps
+        )
+        fwrite(excluded_df, paste0(out_prefix, ".excluded_snps.tsv"), sep = "\t")
+
+        if (n_kept == 0) {
+            bad_ld_ids <- names(z_all)[bad_ld_snp]
+            bad_z_ids <- names(z_all)[bad_z]
+            writeLines(head(bad_ld_ids, 20), paste0(out_prefix, ".bad_ld_ids.txt"))
+            writeLines(head(bad_z_ids, 20), paste0(out_prefix, ".bad_z_ids.txt"))
+            stop("No SNPs remain for SuSiE after excluding non-finite z-scores / LD rows")
+        }
+
+        zvec <- z_all[keep_snps]
+        R_mat <- R_mat[keep_snps, keep_snps, drop = FALSE]
 
         ## Check LD / z-score consistency (Zou et al. 2022)
-        cat(format(Sys.time()), "Checking z-score / LD consistency\n")
+        log_diag("Checking z-score / LD consistency")
         tryCatch({
             check        <- kriging_rss(z = zvec, R = R_mat, n = n)
             suspect_snps <- rownames(check$conditional_dist)[
@@ -753,7 +967,7 @@ task run_susie {
         })
 
         ## Run SuSiE-RSS
-        cat(format(Sys.time()), "Running susie_rss\n")
+        log_diag("Running susie_rss with", length(zvec), "SNPs")
         susie_fit <- tryCatch(
             susie_rss(
                 z                          = zvec,
@@ -768,13 +982,17 @@ task run_susie {
                 estimate_residual_variance = estimate_residual_var,
                 verbose                    = TRUE
             ),
-            error = function(e) { cat("susie_rss failed:", conditionMessage(e), "\n"); NULL }
+            error = function(e) { log_diag("susie_rss failed:", conditionMessage(e)); NULL }
         )
 
         saveRDS(susie_fit, file = paste0(out_prefix, ".rds"))
 
         ## Extract PIPs
-        pip_vec <- if (!is.null(susie_fit)) susie_fit$pip else rep(NA_real_, length(zvec))
+        pip_vec <- rep(NA_real_, length(z_all))
+        names(pip_vec) <- names(z_all)
+        if (!is.null(susie_fit)) {
+            pip_vec[names(zvec)] <- susie_fit$pip
+        }
 
         pip_df <- data.frame(
             phenotype   = phenotype,
@@ -782,8 +1000,8 @@ task run_susie {
             locus_start = locus_start,
             locus_end   = locus_end,
             index_snp   = index_snp,
-            ID          = names(zvec),
-            Z           = as.numeric(zvec),
+            ID          = names(z_all),
+            Z           = as.numeric(z_all),
             PIP         = pip_vec
         )
         fwrite(pip_df, paste0(out_prefix, ".pip.tsv"), sep = "\t")
@@ -819,7 +1037,7 @@ task run_susie {
         }
         fwrite(cs_df, paste0(out_prefix, ".credible_sets.tsv"), sep = "\t")
 
-        cat(format(Sys.time()), "Done\n")
+        log_diag("Done")
         REOF
     >>>
 
@@ -832,6 +1050,8 @@ task run_susie {
         File pip_tsv           = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.pip.tsv"
         File credible_sets_tsv = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.credible_sets.tsv"
         File susie_rds         = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.rds"
+        File excluded_snps_tsv = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.excluded_snps.tsv"
+        File diagnostics_txt   = "susie_~{phenotype}_~{chrom}_~{start}_~{end}.diagnostics.txt"
         File log               = stdout()
     }
 }
