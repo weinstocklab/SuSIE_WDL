@@ -21,6 +21,9 @@ workflow susie_finemapping {
         ## Fine-mapping parameters 
         Float           p_threshold     = 5e-8   # genome-wide significance
         Float           min_maf         = 0.001  # minimum minor allele frequency for locus discovery
+        Float           max_geno_missing = 0.05  # mirror GWAS-side PLINK missingness filter
+        Boolean         pass_only_var_filter = true
+        String?         plink_var_filter          # optional PLINK --var-filter exception names
         Int             window_kb       = 500     # +/- kb around index SNP
         Int             max_causal      = 10      # L parameter in SuSiE
         Float           min_abs_corr    = 0.5     # min |r| for credible sets
@@ -83,7 +86,10 @@ workflow susie_finemapping {
                 end           = locus_end,
                 sample_keep   = extract_sample_keep.sample_keep_file,
                 out_prefix    = "ld_~{locus_chrom}_~{locus_start}_~{locus_end}_~{locus_phenotype}",
-                threads       = threads
+                threads       = threads,
+                max_geno_missing = max_geno_missing,
+                pass_only_var_filter = pass_only_var_filter,
+                plink_var_filter = plink_var_filter
         }
 
         ## 3. Prepare per-locus summary stats
@@ -484,6 +490,9 @@ task compute_ld {
         File    sample_keep
         String  out_prefix
         Int     threads
+        Float   max_geno_missing
+        Boolean pass_only_var_filter
+        String? plink_var_filter
     }
 
     command <<<
@@ -499,6 +508,15 @@ task compute_ld {
         apt-get update -qq && apt-get install -y unzip --quiet
         unzip ~{plink2_binary}
 
+        var_filter_args=()
+        if [[ -n "~{default="" plink_var_filter}" ]]; then
+            var_filter_args=(--var-filter "~{default="" plink_var_filter}")
+            echo "$(date -u) Applying PLINK var filter with exceptions: ~{default="" plink_var_filter}"
+        elif [[ "~{pass_only_var_filter}" == "true" ]]; then
+            var_filter_args=(--var-filter)
+            echo "$(date -u) Applying PLINK PASS-only var filter"
+        fi
+
         ## Extract variants in the locus window
         ./plink2 \
             --pfile ~{plink2_prefix} \
@@ -508,13 +526,15 @@ task compute_ld {
             --to-bp ~{end} \
             --keep ~{sample_keep} \
             --maf 0.001 \
+            --geno ~{max_geno_missing} \
+            "${var_filter_args[@]}" \
             --make-pgen \
             --threads ~{threads} \
             --out ~{out_prefix}.extracted
 
         sample_count=$(tail -n +2 ~{out_prefix}.extracted.psam | wc -l)
         if [[ "${sample_count}" -eq 0 ]]; then
-            echo "No samples remaining after sample/MAF/window filters" >&2
+            echo "No samples remaining after sample/MAF/missingness/window filters" >&2
             exit 13
         fi
         printf "%s\n" "${sample_count}" > n_samples.txt
@@ -526,7 +546,7 @@ task compute_ld {
         echo "$(date -u) Variants retained after filtering: ${variant_count}"
 
         if [[ "${variant_count}" -eq 0 ]]; then
-            echo "No variants remaining in locus after sample/MAF/window filters" >&2
+            echo "No variants remaining in locus after sample/MAF/missingness/variant-filter/window filters" >&2
             exit 14
         elif [[ "${variant_count}" -eq 1 ]]; then
             printf "1\n" > ~{out_prefix}.unphased.vcor
@@ -895,18 +915,37 @@ task run_susie {
             )
         }
 
-        ## Sanitize and subset to SNPs with finite z and fully finite LD rows/cols.
+        ## First drop variants without usable z-scores; unmatched GWAS variants
+        ## should not be allowed to poison the LD QC for the matched subset.
         bad_z <- !is.finite(z_all)
-        bad_ld_entry <- !is.finite(R_mat)
-        bad_ld_snp <- apply(bad_ld_entry, 1, any) | apply(bad_ld_entry, 2, any)
+        keep_finite_z <- !bad_z
         log_diag(
-            "Initial non-finite counts:",
-            "z =", sum(bad_z),
-            "ld_entries =", sum(bad_ld_entry),
-            "ld_rows =", sum(bad_ld_snp)
+            "Initial z-score counts:",
+            "total =", length(z_all),
+            "nonfinite_z =", sum(bad_z),
+            "finite_z =", sum(keep_finite_z)
         )
 
-        R_mat <- (R_mat + t(R_mat)) / 2   # enforce exact symmetry
+        excluded_df <- data.frame(
+            ID = names(z_all),
+            exclude_nonfinite_z = bad_z,
+            exclude_nonfinite_ld = FALSE,
+            kept_for_susie = FALSE
+        )
+
+        if (!any(keep_finite_z)) {
+            fwrite(excluded_df, paste0(out_prefix, ".excluded_snps.tsv"), sep = "\t")
+            writeLines(head(names(z_all), 20), paste0(out_prefix, ".bad_z_ids.txt"))
+            stop("No SNPs have finite z-scores for SuSiE")
+        }
+
+        zvec <- z_all[keep_finite_z]
+        R_mat <- R_mat[keep_finite_z, keep_finite_z, drop = FALSE]
+
+        ## Enforce exact symmetry / valid diagonal before LD QC.
+        R_mat <- (R_mat + t(R_mat)) / 2
+        diag(R_mat) <- 1.0
+
         ld_oob <- abs(R_mat) > (1 + 1e-8)
         ld_oob[is.na(ld_oob)] <- FALSE
         if (any(ld_oob)) {
@@ -918,38 +957,42 @@ task run_susie {
             R_mat[R_mat > 1] <- 1
             R_mat[R_mat < -1] <- -1
         }
-        diag(R_mat) <- 1.0
 
-        keep_snps <- !(bad_z | bad_ld_snp)
+        bad_ld_entry <- !is.finite(R_mat)
+        bad_ld_snp <- apply(bad_ld_entry, 1, any) | apply(bad_ld_entry, 2, any)
+        log_diag(
+            "Post-z-filter LD non-finite counts:",
+            "subset_total =", length(zvec),
+            "ld_entries =", sum(bad_ld_entry),
+            "ld_rows =", sum(bad_ld_snp)
+        )
+
+        keep_snps <- !bad_ld_snp
         n_bad_z <- sum(bad_z)
         n_bad_ld_snp <- sum(bad_ld_snp)
         n_kept <- sum(keep_snps)
         log_diag(
             "SuSiE SNP filtering:",
-            "total =", length(keep_snps),
+            "total =", length(z_all),
             "nonfinite_z =", n_bad_z,
             "nonfinite_ld_rows =", n_bad_ld_snp,
             "kept =", n_kept
         )
 
-        excluded_df <- data.frame(
-            ID = names(z_all),
-            exclude_nonfinite_z = bad_z,
-            exclude_nonfinite_ld = bad_ld_snp,
-            kept_for_susie = keep_snps
-        )
+        excluded_df$exclude_nonfinite_ld[keep_finite_z] <- bad_ld_snp
+        excluded_df$kept_for_susie[keep_finite_z] <- keep_snps
         fwrite(excluded_df, paste0(out_prefix, ".excluded_snps.tsv"), sep = "\t")
 
         if (n_kept == 0) {
-            bad_ld_ids <- names(z_all)[bad_ld_snp]
+            bad_ld_ids <- names(zvec)[bad_ld_snp]
             bad_z_ids <- names(z_all)[bad_z]
             writeLines(head(bad_ld_ids, 20), paste0(out_prefix, ".bad_ld_ids.txt"))
             writeLines(head(bad_z_ids, 20), paste0(out_prefix, ".bad_z_ids.txt"))
             stop("No SNPs remain for SuSiE after excluding non-finite z-scores / LD rows")
         }
 
-        zvec <- z_all[keep_snps]
         R_mat <- R_mat[keep_snps, keep_snps, drop = FALSE]
+        zvec <- zvec[keep_snps]
 
         ## Check LD / z-score consistency (Zou et al. 2022)
         log_diag("Checking z-score / LD consistency")
