@@ -1474,8 +1474,8 @@ task check_indel_pass {
 
         .venv/bin/python3 - <<'PYEOF'
 import pandas as pd
-import subprocess
 import os
+import dxpy
 
 loci = pd.read_csv("~{loci_manifest}", sep="\t")
 os.makedirs("indel_pass_results", exist_ok=True)
@@ -1495,23 +1495,21 @@ for _, row in loci.iterrows():
     if chrom not in downloaded:
         local_pvar = f"chr{chrom}.pvar"
         print(f"Downloading pvar for chr{chrom} from {pvar_dx}...")
-        ret = subprocess.run(
-            ["dx", "download", pvar_dx, "-o", local_pvar],
-            capture_output=True, text=True
-        )
-        if ret.returncode != 0:
-            print(f"  WARNING: could not download {pvar_dx}: {ret.stderr.strip()}")
-            downloaded[chrom] = None
-        else:
+        try:
+            dxpy.download_dxfile(pvar_dx, local_pvar)
             downloaded[chrom] = local_pvar
+        except Exception as e:
+            print(f"  WARNING: could not download {pvar_dx}: {e}")
+            downloaded[chrom] = None
+
     local_pvar = downloaded[chrom]
 
     if not local_pvar or not os.path.exists(local_pvar):
         summary_rows.append({"locus": locus_id, "chrom": chrom,
                              "pos": pos, "verdict_flags": "NO_FILE"})
-        continue
+        continue  # <-- fixed indentation (was misindented before)
 
-    result = subprocess.run(
+    result = __import__("subprocess").run(
         f"grep -v '^#' {local_pvar} | awk -v s={start} -v e={end} '$2+0>=s && $2+0<=e'",
         shell=True, capture_output=True, text=True
     )
