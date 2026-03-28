@@ -535,6 +535,7 @@ task compute_ld {
             --geno ~{max_geno_missing} \
             "${var_filter_args[@]}" \
             --make-pgen \
+            --memory 12000 \
             --threads ~{threads} \
             --out ~{out_prefix}.extracted
 
@@ -563,6 +564,7 @@ task compute_ld {
                 --pfile ~{out_prefix}.extracted \
                 --no-pheno \
                 --r-unphased square allow-ambiguous-allele \
+                --memory 12000 \
                 --threads ~{threads} \
                 --out ~{out_prefix}
 
@@ -591,7 +593,7 @@ task compute_ld {
 
     runtime {
         docker: "ghcr.io/rgcgithub/regenie/regenie:v4.1.gz"
-        dx_instance_type: "mem1_ssd1_v2_x4"
+        dx_instance_type: "mem2_ssd1_v2_x4"
     }
 
     parameter_meta {
@@ -1493,21 +1495,23 @@ for _, row in loci.iterrows():
     end      = pos + window
 
     if chrom not in downloaded:
-        local_pvar = f"chr{chrom}.pvar"
-        print(f"Downloading pvar for chr{chrom} from {pvar_dx}...")
-        try:
-            dxpy.download_dxfile(pvar_dx, local_pvar)
-            downloaded[chrom] = local_pvar
+       local_pvar = f"chr{chrom}.pvar"
+       print(f"Downloading pvar for chr{chrom} from {pvar_dx}...")
+       try:
+           import re
+           file_id = re.search(r'(file-[A-Za-z0-9]+)', pvar_dx).group(1)
+           dxpy.download_dxfile(file_id, local_pvar)
+           downloaded[chrom] = local_pvar
         except Exception as e:
-            print(f"  WARNING: could not download {pvar_dx}: {e}")
-            downloaded[chrom] = None
+           print(f"  WARNING: could not download {pvar_dx}: {e}")
+           downloaded[chrom] = None
 
     local_pvar = downloaded[chrom]
 
     if not local_pvar or not os.path.exists(local_pvar):
         summary_rows.append({"locus": locus_id, "chrom": chrom,
                              "pos": pos, "verdict_flags": "NO_FILE"})
-        continue  # <-- fixed indentation (was misindented before)
+        continue  
 
     result = __import__("subprocess").run(
         f"grep -v '^#' {local_pvar} | awk -v s={start} -v e={end} '$2+0>=s && $2+0<=e'",
