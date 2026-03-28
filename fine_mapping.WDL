@@ -1550,7 +1550,7 @@ PYEOF
         File indel_summary = "indel_pass_results/indel_pass_summary.tsv"
     }
     runtime {
-        docker: "python3.11-slim"
+        docker: "python:3.11-slim"
         dx_instance_type: "mem1_ssd1_v2_x2"
     }
 }
