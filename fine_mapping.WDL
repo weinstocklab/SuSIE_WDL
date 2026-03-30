@@ -1476,29 +1476,34 @@ task check_indel_pass {
         python3 -m venv .venv
         .venv/bin/pip install pandas --quiet
 
-        .venv/bin/python3 - <<'PYEOF'
+        python3 <<'PYEOF'
 import pandas as pd
 import os
 import subprocess
-import sys
+import glob
 
-loci = pd.read_csv("~{loci_manifest}", sep="\t")
+loci = pd.read_csv("loci_manifest", sep="\t")
 os.makedirs("indel_pass_results", exist_ok=True)
 
-pvar_files = [f.strip() for f in """~{sep('\n', pvar_files)}""".strip().split('\n') if f.strip()]
-
-if len(pvar_files) != len(loci):
-    print(f"WARNING: {len(pvar_files)} pvar files but {len(loci)} loci", flush=True)
+# Find all .pvar files in current directory (they're staged here)
+pvar_files_found = sorted(glob.glob("*.extracted.pvar"))
+print(f"Found {len(pvar_files_found)} pvar files in working directory", flush=True)
+for f in pvar_files_found:
+    print(f"  {f}", flush=True)
 
 summary_rows = []
 pvar_by_chrom = {}
 
-for idx, pvar_file in enumerate(pvar_files):
-    if os.path.exists(pvar_file):
-        chrom = str(loci.iloc[idx]["chrom"]).replace("chr", "") if idx < len(loci) else None
-        if chrom:
-            pvar_by_chrom[chrom] = pvar_file
-            print(f"Found pvar for chr{chrom}: {pvar_file}", flush=True)
+# Build a map of chrom -> pvar file
+for pvar_file in pvar_files_found:
+    # Extract chrom from filename (e.g., ld_chr1_1_1000000_phenotype.extracted.pvar -> chr1)
+    if "ld_chr" in pvar_file:
+        parts = pvar_file.split("_")
+        if len(parts) > 2:
+            chrom = parts[1].replace("chr", "")
+            if chrom:
+                pvar_by_chrom[chrom] = pvar_file
+                print(f"Mapped chr{chrom} -> {pvar_file}", flush=True)
 
 for _, row in loci.iterrows():
     chrom    = str(row["chrom"]).replace("chr", "")
