@@ -1095,7 +1095,7 @@ task run_susie {
 
     runtime {
         docker: "~{docker}"
-        dx_instance_type: "mem2_ssd1_v2_x4"
+        dx_instance_type: "mem2_ssd1_v2_x8"
     }
 
     output {
