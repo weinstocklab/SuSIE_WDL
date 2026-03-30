@@ -1494,24 +1494,24 @@ for _, row in loci.iterrows():
     start    = max(0, pos - window)
     end      = pos + window
 
-    if chrom not in downloaded:
-       local_pvar = f"chr{chrom}.pvar"
-       print(f"Downloading pvar for chr{chrom} from {pvar_dx}...")
-       try:
-           import re
-           file_id = re.search(r'(file-[A-Za-z0-9]+)', pvar_dx).group(1)
-           dxpy.download_dxfile(file_id, local_pvar)
-           downloaded[chrom] = local_pvar
+    if chrom not in downloaded:          
+        local_pvar = f"chr{chrom}.pvar"
+        print(f"Downloading pvar for chr{chrom} from {pvar_dx}...")
+        try:
+            import re
+            file_id = re.search(r'(file-[A-Za-z0-9]+)', pvar_dx).group(1)
+            dxpy.download_dxfile(file_id, local_pvar)
+            downloaded[chrom] = local_pvar
         except Exception as e:
-           print(f"  WARNING: could not download {pvar_dx}: {e}")
-           downloaded[chrom] = None
+            print(f"  WARNING: could not download {pvar_dx}: {e}")
+            downloaded[chrom] = None
 
     local_pvar = downloaded[chrom]
 
     if not local_pvar or not os.path.exists(local_pvar):
         summary_rows.append({"locus": locus_id, "chrom": chrom,
                              "pos": pos, "verdict_flags": "NO_FILE"})
-        continue  
+        continue
 
     result = __import__("subprocess").run(
         f"grep -v '^#' {local_pvar} | awk -v s={start} -v e={end} '$2+0>=s && $2+0<=e'",
@@ -1519,8 +1519,8 @@ for _, row in loci.iterrows():
     )
     lines = [l.split("\t") for l in result.stdout.strip().split("\n") if l]
 
-    flags     = []
-    multi     = sum(1 for l in lines if len(l) > 4 and "," in l[4])
+    flags = []
+    multi = sum(1 for l in lines if len(l) > 4 and "," in l[4])
     indels    = sum(1 for l in lines if len(l) > 4
                     and abs(int(l[1]) - pos) <= 1000 and len(l[4]) > 50)
     exact     = [l for l in lines if len(l) > 1 and int(l[1]) == pos]
