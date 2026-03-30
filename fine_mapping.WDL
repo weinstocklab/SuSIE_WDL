@@ -154,7 +154,8 @@ workflow susie_finemapping {
 
     call check_indel_pass {
         input:
-            loci_manifest = identify_loci.loci_manifest
+            loci_manifest = identify_loci.loci_manifest,
+            pvar_files = compute_ld.extracted_pvar
     }
 
     output {
@@ -1468,116 +1469,49 @@ task combine_results {
 task check_indel_pass {
     input {
         File loci_manifest
+        Array[File] pvar_files
     }
     command <<<
         set -euo pipefail
         python3 -m venv .venv
-        .venv/bin/pip install pandas dxpy --quiet
+        .venv/bin/pip install pandas --quiet
 
         .venv/bin/python3 - <<'PYEOF'
 import pandas as pd
 import os
-import re
 import subprocess
-import dxpy
-
-def resolve_dx_file(pvar_path):
-    """
-    Resolve a DNANexus file path to a local file.
-    Handles multiple formats:
-    - file-XXXXX: Direct file ID
-    - dx://PROJECT/FILE or /path/to/file: DNANexus URIs and project paths
-    - Direct file paths (already local)
-    """
-    pvar_path = str(pvar_path).strip()
-    
-    if not pvar_path:
-        return None
-    
-    # If it's already a file path in the current directory, use it
-    if os.path.exists(pvar_path):
-        return pvar_path
-    
-    # Try to extract file-ID format (e.g., "file-ABC123DEF...")
-    file_id_match = re.search(r'(file-[A-Za-z0-9]+)', pvar_path)
-    if file_id_match:
-        file_id = file_id_match.group(1)
-        try:
-            # Get file size to verify it exists
-            file_desc = dxpy.describe(file_id)
-            filename = file_desc.get('name', f"{file_id}.pvar")
-            local_path = filename if os.path.dirname(filename) else f"./{filename}"
-            dxpy.download_dxfile(file_id, local_path)
-            return local_path
-        except Exception as e:
-            raise ValueError(f"Failed to download file-ID {file_id}: {e}")
-    
-    # Try dx:// format (e.g., dx://project-ID/file-ID:name)
-    if pvar_path.startswith('dx://'):
-        try:
-            # Parse dx:// path and resolve to file-ID
-            parts = pvar_path.replace('dx://', '').split('/')
-            if len(parts) >= 2:
-                file_part = parts[1]  # Should be file-ID or file-ID:name
-                file_id = file_part.split(':')[0]
-                if file_id.startswith('file-'):
-                    filename = file_part.split(':')[1] if ':' in file_part else f"{file_id}.pvar"
-                    local_path = filename if os.path.dirname(filename) else f"./{filename}"
-                    dxpy.download_dxfile(file_id, local_path)
-                    return local_path
-        except Exception as e:
-            raise ValueError(f"Failed to resolve dx:// path {pvar_path}: {e}")
-    
-    # Try direct project path resolution (e.g., /project-ID/file-ID)
-    try:
-        file_id_match = re.search(r'(file-[A-Za-z0-9]+)', pvar_path)
-        if file_id_match:
-            file_id = file_id_match.group(1)
-            filename = os.path.basename(pvar_path) or f"{file_id}.pvar"
-            local_path = filename if os.path.dirname(filename) else f"./{filename}"
-            dxpy.download_dxfile(file_id, local_path)
-            return local_path
-    except Exception as e:
-        raise ValueError(f"Could not resolve path {pvar_path}: {e}")
-    
-    return None
+import sys
 
 loci = pd.read_csv("~{loci_manifest}", sep="\t")
 os.makedirs("indel_pass_results", exist_ok=True)
 
+pvar_files = [f.strip() for f in """~{sep('\n', pvar_files)}""".strip().split('\n') if f.strip()]
+
+if len(pvar_files) != len(loci):
+    print(f"WARNING: {len(pvar_files)} pvar files but {len(loci)} loci", flush=True)
+
 summary_rows = []
-downloaded = {}
+pvar_by_chrom = {}
+
+for idx, pvar_file in enumerate(pvar_files):
+    if os.path.exists(pvar_file):
+        chrom = str(loci.iloc[idx]["chrom"]).replace("chr", "") if idx < len(loci) else None
+        if chrom:
+            pvar_by_chrom[chrom] = pvar_file
+            print(f"Found pvar for chr{chrom}: {pvar_file}", flush=True)
 
 for _, row in loci.iterrows():
     chrom    = str(row["chrom"]).replace("chr", "")
     pos      = int(row["pos"])
     locus_id = f"chr{chrom}_{pos}"
-    pvar_dx  = str(row["pvar_dx_path"])
     window   = 10000
     start    = max(0, pos - window)
     end      = pos + window
 
-    if chrom not in downloaded:          
-        local_pvar = f"chr{chrom}.pvar"
-        print(f"Processing pvar for chr{chrom}...")
-        try:
-            resolved_path = resolve_dx_file(pvar_dx)
-            if resolved_path and os.path.exists(resolved_path):
-                # Check if we need to rename it to the standard name
-                if resolved_path != local_pvar:
-                    os.rename(resolved_path, local_pvar)
-                downloaded[chrom] = local_pvar
-                print(f"  Successfully resolved to {local_pvar}")
-            else:
-                print(f"  ERROR: Could not resolve file path {pvar_dx}")
-                downloaded[chrom] = None
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            downloaded[chrom] = None
-
-    local_pvar = downloaded[chrom]
+    local_pvar = pvar_by_chrom.get(chrom)
 
     if not local_pvar or not os.path.exists(local_pvar):
+        print(f"  {locus_id}: NO_FILE", flush=True)
         summary_rows.append({"locus": locus_id, "chrom": chrom,
                              "pos": pos, "verdict_flags": "NO_FILE"})
         continue
@@ -1609,12 +1543,12 @@ for _, row in loci.iterrows():
         "variant_density_10kb":    len(lines),
         "verdict_flags":           ";".join(flags) or "NONE"
     })
-    print(f"  {locus_id} -> {';'.join(flags) or 'NONE'}")
+    print(f"  {locus_id} -> {';'.join(flags) or 'NONE'}", flush=True)
 
 pd.DataFrame(summary_rows).to_csv(
     "indel_pass_results/indel_pass_summary.tsv", sep="\t", index=False
 )
-print(f"Done. Wrote {len(summary_rows)} loci.")
+print(f"Done. Wrote {len(summary_rows)} loci.", flush=True)
 PYEOF
     >>>
     output {
