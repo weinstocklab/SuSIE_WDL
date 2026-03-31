@@ -38,7 +38,7 @@ workflow susie_finemapping {
 
         ## Runtime 
         Int             threads     = 4
-        String          r_docker    = "rocker/r-ubuntu:4.3.0"
+        String          r_docker    = "rocker/r-ver:4.3.0"
     }
 
     call extract_sample_keep {
