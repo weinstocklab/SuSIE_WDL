@@ -838,11 +838,11 @@ task run_susie {
         Rscript - <<'REOF'
 
         if (!requireNamespace("susieR",     quietly = TRUE))
-            install.packages("susieR",     repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
+            install.packages("susieR",     repos = "https://cloud.r-project.org", quiet = TRUE)
         if (!requireNamespace("data.table", quietly = TRUE))
-            install.packages("data.table", repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
+            install.packages("data.table", repos = "https://cloud.r-project.org", quiet = TRUE)
         if (!requireNamespace("Rfast",     quietly = TRUE))
-            install.packages("Rfast",     repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
+            install.packages("Rfast",     repos = "https://cloud.r-project.org", quiet = TRUE)
 
         library(susieR)
         library(data.table)
@@ -1134,11 +1134,11 @@ task plot_locus {
 
         Rscript - <<'REOF'
         if (!requireNamespace("data.table", quietly = TRUE))
-            install.packages("data.table", repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
+            install.packages("data.table", repos = "https://cloud.r-project.org", quiet = TRUE)
         if (!requireNamespace("ggplot2", quietly = TRUE))
-            install.packages("ggplot2", repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
+            install.packages("ggplot2", repos = "https://cloud.r-project.org", quiet = TRUE)
         if (!requireNamespace("cowplot", quietly = TRUE))
-            install.packages("cowplot", repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
+            install.packages("cowplot", repos = "https://cloud.r-project.org", quiet = TRUE)
 
         library(data.table)
         library(ggplot2)
