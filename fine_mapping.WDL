@@ -29,7 +29,7 @@ workflow susie_finemapping {
         Float           min_abs_corr    = 0.5     # min |r| for credible sets
         Float           coverage        = 0.95    # credible set coverage
         Int             max_iter        = 500     # SuSiE max iterations
-        Float           tol             = 1e-3    # SuSiE convergence tol
+        Float           tol             = 0.002    # SuSiE convergence tol
         Boolean         refine          = true    # use SuSiE refinement
         Boolean         estimate_residual_variance = true
 
@@ -841,9 +841,12 @@ task run_susie {
             install.packages("susieR",     repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
         if (!requireNamespace("data.table", quietly = TRUE))
             install.packages("data.table", repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
+        if (!requireNamespace("Rfast",     quietly = TRUE))
+            install.packages("Rfast",     repos = "https://cloud.r-project.org", type = "binary", quiet = TRUE)
 
         library(susieR)
         library(data.table)
+        library(Rfast)
 
         phenotype   <- "~{phenotype}"
         chrom       <- "~{chrom}"
