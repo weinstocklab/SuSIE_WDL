@@ -1282,7 +1282,28 @@ task plot_locus {
         }
 
         gencode_url <- "https://raw.githubusercontent.com/weinstocklab/gwasplot/main/data/gencode.rda"
-        utils::download.file(gencode_url, destfile = "gencode.rda", mode = "wb", quiet = TRUE)
+        
+        # Retry logic for download with exponential backoff
+        max_retries <- 5
+        retry_count <- 0
+        download_success <- FALSE
+        
+        while (!download_success && retry_count < max_retries) {
+            tryCatch({
+                utils::download.file(gencode_url, destfile = "gencode.rda", mode = "wb", quiet = TRUE)
+                download_success <- TRUE
+            }, error = function(e) {
+                retry_count <<- retry_count + 1
+                if (retry_count < max_retries) {
+                    wait_time <- 2^retry_count
+                    message(paste("Download failed, retrying in", wait_time, "seconds (attempt", retry_count + 1, "of", max_retries, ")"))
+                    Sys.sleep(wait_time)
+                } else {
+                    stop(paste("Failed to download gencode.rda after", max_retries, "attempts:", e$message))
+                }
+            })
+        }
+        
         load("gencode.rda")
         gencode_dt <- as.data.table(gencode)
 
