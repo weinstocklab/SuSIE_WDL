@@ -89,6 +89,7 @@ workflow susie_finemapping {
                 out_prefix    = "ld_~{locus_chrom}_~{locus_start}_~{locus_end}_~{locus_phenotype}",
                 threads       = threads,
                 max_geno_missing = max_geno_missing,
+                min_maf       = min_maf,
                 pass_only_var_filter = pass_only_var_filter,
                 plink_var_filter = plink_var_filter
         }
@@ -109,7 +110,8 @@ workflow susie_finemapping {
                 start                 = locus_start,
                 end                   = locus_end,
                 variant_ids           = compute_ld.variant_ids,
-                ld_variants_pvar      = compute_ld.extracted_pvar
+                ld_variants_pvar      = compute_ld.extracted_pvar,
+                min_maf               = min_maf
         }
 
         ## 4. Run SuSiE
@@ -129,6 +131,7 @@ workflow susie_finemapping {
                 coverage                   = coverage,
                 max_iter                   = max_iter,
                 tol                        = tol,
+                min_maf                    = min_maf,
                 refine                     = refine,
                 estimate_residual_variance = estimate_residual_variance,
                 docker                     = r_docker,
@@ -507,6 +510,7 @@ task compute_ld {
         String  out_prefix
         Int     threads
         Float   max_geno_missing
+        Float   min_maf
         Boolean pass_only_var_filter
         String? plink_var_filter
         String  instance_type = "mem2_ssd1_v2_x4"  # small by default
@@ -542,7 +546,7 @@ task compute_ld {
             --from-bp ~{start} \
             --to-bp ~{end} \
             --keep ~{sample_keep} \
-            --maf 0.001 \
+            --maf ~{min_maf} \
             --geno ~{max_geno_missing} \
             "${var_filter_args[@]}" \
             --make-pgen \
@@ -660,6 +664,7 @@ task prepare_locus_sumstats {
         String  end
         File    variant_ids
         File    ld_variants_pvar
+        Float   min_maf
     }
 
     command <<<
@@ -677,6 +682,7 @@ task prepare_locus_sumstats {
         chrom  = "~{chrom}".upper()
         win_st = int("~{start}")
         win_en = int("~{end}")
+        min_maf = ~{min_maf}
 
         ld_snps = pd.read_csv("~{variant_ids}", header=None, names=["ID"], dtype=str)
         ld_pvar = pd.read_csv("~{ld_variants_pvar}", sep="\t", dtype=str)
@@ -706,8 +712,9 @@ task prepare_locus_sumstats {
             WHERE phenotype = ?
               AND replace(upper(CHROM), 'CHR', '') IN (?, ?)
               AND CAST(POS AS BIGINT) BETWEEN ? AND ?
+              AND least(CAST(A1FREQ AS DOUBLE), 1.0 - CAST(A1FREQ AS DOUBLE)) >= ?
             """,
-            ["~{summary_stats_parquet}", pheno, chrom, "23" if chrom == "X" else chrom, win_st, win_en],
+            ["~{summary_stats_parquet}", pheno, chrom, "23" if chrom == "X" else chrom, win_st, win_en, min_maf],
         ).df()
 
         window["CHROM"] = (
@@ -864,6 +871,7 @@ task run_susie {
         Float   coverage
         Int     max_iter
         Float   tol
+        Float   min_maf
         Boolean refine
         Boolean estimate_residual_variance
         String  docker
