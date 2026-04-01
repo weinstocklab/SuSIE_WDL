@@ -20,7 +20,7 @@ workflow susie_finemapping {
 
         ## Fine-mapping parameters 
         Float           p_threshold     = 5e-8   # genome-wide significance
-        Float           min_maf         = 0.002  # minimum minor allele frequency for locus discovery
+        Float           min_maf         = 0.003  # minimum minor allele frequency for locus discovery
         Float           max_geno_missing = 0.05  # mirror GWAS-side PLINK missingness filter
         Boolean         pass_only_var_filter = true
         String?         plink_var_filter          # optional PLINK --var-filter exception names
@@ -39,6 +39,7 @@ workflow susie_finemapping {
         ## Runtime 
         Int             threads     = 4
         String          r_docker    = "rocker/r-ver:4.3.0"
+        Int             variant_count_threshold = 4000  # threshold for dynamic instance selection (>= threshold = large)
     }
 
     call extract_sample_keep {
@@ -92,6 +93,13 @@ workflow susie_finemapping {
                 plink_var_filter = plink_var_filter
         }
 
+        ## Determine instance type based on variant count
+        call determine_instance_type {
+            input:
+                variant_ids = compute_ld.variant_ids,
+                threshold = variant_count_threshold
+        }
+
         ## 3. Prepare per-locus summary stats
         call prepare_locus_sumstats {
             input:
@@ -123,7 +131,8 @@ workflow susie_finemapping {
                 tol                        = tol,
                 refine                     = refine,
                 estimate_residual_variance = estimate_residual_variance,
-                docker                     = r_docker
+                docker                     = r_docker,
+                instance_type              = determine_instance_type.instance_type
         }
 
         ## 5. Create locuszoom-style plot with SuSiE overlays
@@ -500,6 +509,7 @@ task compute_ld {
         Float   max_geno_missing
         Boolean pass_only_var_filter
         String? plink_var_filter
+        String  instance_type = "mem2_ssd1_v2_x4"  # small by default
     }
 
     command <<<
@@ -594,7 +604,7 @@ task compute_ld {
 
     runtime {
         docker: "ghcr.io/rgcgithub/regenie/regenie:v4.1.gz"
-        dx_instance_type: "mem2_ssd1_v2_x4"
+        dx_instance_type: "~{instance_type}"
     }
 
     parameter_meta {
@@ -609,6 +619,33 @@ task compute_ld {
         File   extracted_pvar = "~{out_prefix}.extracted.pvar"
         String n_samples   = read_string("n_samples.txt")
         String ld_status   = read_string("ld_status.txt")
+    }
+}
+
+
+task determine_instance_type {
+
+    input {
+        File    variant_ids
+        Int     threshold
+    }
+
+    command <<<
+        variant_count=$(wc -l < ~{variant_ids})
+        if [[ ${variant_count} -ge ~{threshold} ]]; then
+            echo "mem2_ssd1_v2_x8"
+        else
+            echo "mem2_ssd1_v2_x4"
+        fi
+    >>>
+
+    runtime {
+        docker: "python:3.11-slim"
+        dx_instance_type: "mem1_ssd1_v2_x2"
+    }
+
+    output {
+        String instance_type = read_string(stdout())
     }
 }
 
@@ -830,6 +867,7 @@ task run_susie {
         Boolean refine
         Boolean estimate_residual_variance
         String  docker
+        String  instance_type = "mem2_ssd1_v2_x8"  # small by default for SuSiE
     }
 
     command <<<
@@ -1098,7 +1136,7 @@ task run_susie {
 
     runtime {
         docker: "~{docker}"
-        dx_instance_type: "mem2_ssd1_v2_x8"
+        dx_instance_type: "~{instance_type}"
     }
 
     output {
