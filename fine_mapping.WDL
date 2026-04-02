@@ -38,7 +38,7 @@ workflow susie_finemapping {
 
         ## Runtime 
         Int             threads     = 4
-        String          r_docker    = "rocker/r-ver:4.3.0"
+        String          r_docker    = "jweinstk/fine_mapping:4.5.3"
         Int             variant_count_threshold = 4000  # threshold for dynamic instance selection (>= threshold = large)
     }
 
@@ -883,13 +883,6 @@ task run_susie {
 
         Rscript - <<'REOF'
 
-        if (!requireNamespace("susieR",     quietly = TRUE))
-            install.packages("susieR",     repos = "https://cloud.r-project.org", quiet = TRUE)
-        if (!requireNamespace("data.table", quietly = TRUE))
-            install.packages("data.table", repos = "https://cloud.r-project.org", quiet = TRUE)
-        if (!requireNamespace("Rfast",     quietly = TRUE))
-            install.packages("Rfast",     repos = "https://cloud.r-project.org", quiet = TRUE)
-
         library(susieR)
         library(data.table)
         library(Rfast)
@@ -1179,12 +1172,6 @@ task plot_locus {
         set -euo pipefail
 
         Rscript - <<'REOF'
-        if (!requireNamespace("data.table", quietly = TRUE))
-            install.packages("data.table", repos = "https://cloud.r-project.org", quiet = TRUE)
-        if (!requireNamespace("ggplot2", quietly = TRUE))
-            install.packages("ggplot2", repos = "https://cloud.r-project.org", quiet = TRUE)
-        if (!requireNamespace("cowplot", quietly = TRUE))
-            install.packages("cowplot", repos = "https://cloud.r-project.org", quiet = TRUE)
 
         library(data.table)
         library(ggplot2)
@@ -1281,30 +1268,7 @@ task plot_locus {
             gene_df
         }
 
-        gencode_url <- "https://raw.githubusercontent.com/weinstocklab/gwasplot/main/data/gencode.rda"
-        
-        # Retry logic for download with exponential backoff
-        max_retries <- 5
-        retry_count <- 0
-        download_success <- FALSE
-        
-        while (!download_success && retry_count < max_retries) {
-            tryCatch({
-                utils::download.file(gencode_url, destfile = "gencode.rda", mode = "wb", quiet = TRUE)
-                download_success <- TRUE
-            }, error = function(e) {
-                retry_count <<- retry_count + 1
-                if (retry_count < max_retries) {
-                    wait_time <- 2^retry_count
-                    message(paste("Download failed, retrying in", wait_time, "seconds (attempt", retry_count + 1, "of", max_retries, ")"))
-                    Sys.sleep(wait_time)
-                } else {
-                    stop(paste("Failed to download gencode.rda after", max_retries, "attempts:", e$message))
-                }
-            })
-        }
-        
-        load("gencode.rda")
+        load("/usr/local/lib/R/gencode.rda")
         gencode_dt <- as.data.table(gencode)
 
         genes <- gencode_dt[
