@@ -363,6 +363,38 @@ task identify_loci {
             ],
         )
 
+        # Merge overlapping intervals within each phenotype and chromosome
+        if not loci_df.empty:
+            merged_loci = []
+            for pheno in loci_df["phenotype"].unique():
+                pheno_df = loci_df[loci_df["phenotype"] == pheno]
+                for chrom in pheno_df["chrom"].unique():
+                    chrom_loci = pheno_df[pheno_df["chrom"] == chrom].sort_values("window_start").copy()
+                    
+                    if len(chrom_loci) == 0:
+                        continue
+                    
+                    # Merge overlapping intervals
+                    intervals = []
+                    current = chrom_loci.iloc[0].to_dict()
+                    
+                    for idx in range(1, len(chrom_loci)):
+                        row = chrom_loci.iloc[idx]
+                        # Check if current interval overlaps with next interval
+                        if row["window_start"] <= current["window_end"]:
+                            # Merge: extend the end, keep the most significant (first) index_snp
+                            current["window_end"] = max(current["window_end"], row["window_end"])
+                        else:
+                            # No overlap, save current and start new interval
+                            intervals.append(current)
+                            current = row.to_dict()
+                    
+                    # Don't forget the last interval
+                    intervals.append(current)
+                    merged_loci.extend(intervals)
+            
+            loci_df = pd.DataFrame(merged_loci)
+
         manifest = pd.read_csv("~{step2_chunk_manifest}", sep="\t", dtype=str)
         required_cols = [
             "chrom",
