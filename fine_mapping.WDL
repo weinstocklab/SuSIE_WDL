@@ -20,15 +20,15 @@ workflow susie_finemapping {
 
         ## Fine-mapping parameters 
         Float           p_threshold     = 5e-8   # genome-wide significance
-        Float           min_maf         = 0.003  # minimum minor allele frequency for locus discovery
+        Float           min_maf         = 0.004  # minimum minor allele frequency for locus discovery
         Float           max_geno_missing = 0.05  # mirror GWAS-side PLINK missingness filter
         Boolean         pass_only_var_filter = true
         String?         plink_var_filter          # optional PLINK --var-filter exception names
-        Int             window_kb       = 500     # +/- kb around index SNP
+        Int             window_kb       = 1000     # +/- kb around index SNP
         Int             max_causal      = 10      # L parameter in SuSiE
         Float           min_abs_corr    = 0.5     # min |r| for credible sets
         Float           coverage        = 0.95    # credible set coverage
-        Int             max_iter        = 100     # SuSiE max iterations
+        Int             max_iter        = 70      # SuSiE max iterations
         Float           tol             = 0.002    # SuSiE convergence tol
         Boolean         refine          = true    # use SuSiE refinement
         Boolean         estimate_residual_variance = true
