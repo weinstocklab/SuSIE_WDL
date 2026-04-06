@@ -1557,18 +1557,23 @@ for f in pvar_files_found:
     print(f"  {f}", flush=True)
 
 summary_rows = []
-pvar_by_chrom = {}
+pvar_regions = []
 
-# Build a map of chrom -> pvar file
+# Build a list of (chrom, start, end, filename) from pvar files
 for pvar_file in pvar_files_found:
-    # Extract chrom from filename (e.g., ld_12_13343355_15343355_residual.extracted.pvar -> 12)
-    if pvar_file.startswith("ld_") and pvar_file.endswith(".extracted.pvar"):
-        parts = pvar_file.split("_")
-        if len(parts) >= 2:
-            chrom = parts[1]
-            if chrom:
-                pvar_by_chrom[chrom] = pvar_file
-                print(f"Mapped chr{chrom} -> {pvar_file}", flush=True)
+    # Extract chrom and positions from filename (e.g., ld_12_13343355_15343355_residual.extracted.pvar)
+    basename = os.path.basename(pvar_file)
+    if basename.startswith("ld_") and basename.endswith(".extracted.pvar"):
+        parts = basename.split("_")
+        if len(parts) >= 4:
+            try:
+                chrom = parts[1]
+                start_pos = int(parts[2])
+                end_pos = int(parts[3])
+                pvar_regions.append((chrom, start_pos, end_pos, pvar_file))
+                print(f"Parsed: chr{chrom}:{start_pos}-{end_pos} -> {basename}", flush=True)
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Could not parse {basename}: {e}", flush=True)
 
 for _, row in loci.iterrows():
     chrom    = str(row["chrom"]).replace("chr", "")
@@ -1578,10 +1583,15 @@ for _, row in loci.iterrows():
     start    = max(0, pos - window)
     end      = pos + window
 
-    local_pvar = pvar_by_chrom.get(chrom)
+    # Find the pvar file whose range contains this locus position
+    local_pvar = None
+    for pvar_chrom, pvar_start, pvar_end, pvar_file in pvar_regions:
+        if pvar_chrom == chrom and pvar_start <= pos <= pvar_end:
+            local_pvar = pvar_file
+            break
 
     if not local_pvar or not os.path.exists(local_pvar):
-        print(f"  {locus_id}: NO_FILE", flush=True)
+        print(f"  {locus_id}: NO_FILE (searched {len(pvar_regions)} regions)", flush=True)
         summary_rows.append({"locus": locus_id, "chrom": chrom,
                              "pos": pos, "verdict_flags": "NO_FILE"})
         continue
