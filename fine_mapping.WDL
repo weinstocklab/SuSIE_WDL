@@ -1546,14 +1546,13 @@ task check_indel_pass {
 import pandas as pd
 import os
 import subprocess
-import glob
 
 loci = pd.read_csv("~{loci_manifest}", sep="\t")
 os.makedirs("indel_pass_results", exist_ok=True)
 
-# Find all .pvar files in current directory (they're staged here)
-pvar_files_found = sorted(glob.glob("*.extracted.pvar"))
-print(f"Found {len(pvar_files_found)} pvar files in working directory", flush=True)
+# Get pvar files from WDL input
+pvar_files_found = ["~{sep='", "' pvar_files}"]
+print(f"Found {len(pvar_files_found)} pvar files", flush=True)
 for f in pvar_files_found:
     print(f"  {f}", flush=True)
 
@@ -1562,11 +1561,11 @@ pvar_by_chrom = {}
 
 # Build a map of chrom -> pvar file
 for pvar_file in pvar_files_found:
-    # Extract chrom from filename (e.g., ld_chr1_1_1000000_phenotype.extracted.pvar -> chr1)
-    if "ld_chr" in pvar_file:
+    # Extract chrom from filename (e.g., ld_12_13343355_15343355_residual.extracted.pvar -> 12)
+    if pvar_file.startswith("ld_") and pvar_file.endswith(".extracted.pvar"):
         parts = pvar_file.split("_")
-        if len(parts) > 2:
-            chrom = parts[1].replace("chr", "")
+        if len(parts) >= 2:
+            chrom = parts[1]
             if chrom:
                 pvar_by_chrom[chrom] = pvar_file
                 print(f"Mapped chr{chrom} -> {pvar_file}", flush=True)
