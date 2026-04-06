@@ -1476,7 +1476,7 @@ task plot_locus {
 
     runtime {
         docker: "~{docker}"
-        dx_instance_type: "mem2_ssd1_v2_x2"
+        dx_instance_type: "mem2_ssd1_v2_x8"
     }
 
     output {
