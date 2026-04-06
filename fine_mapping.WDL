@@ -1542,7 +1542,7 @@ task check_indel_pass {
         python3 -m venv .venv
         .venv/bin/pip install pandas --quiet
 
-        python3 <<'PYEOF'
+        .venv/bin/python3 <<'PYEOF'
 import pandas as pd
 import os
 import subprocess
