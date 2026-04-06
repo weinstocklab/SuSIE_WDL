@@ -1548,7 +1548,7 @@ import os
 import subprocess
 import glob
 
-loci = pd.read_csv("loci_manifest", sep="\t")
+loci = pd.read_csv("~{loci_manifest}", sep="\t")
 os.makedirs("indel_pass_results", exist_ok=True)
 
 # Find all .pvar files in current directory (they're staged here)
