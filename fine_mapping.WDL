@@ -1148,7 +1148,7 @@ task run_susie {
                     min_abs_corr = susie_fit$sets$purity[cs_name, "min.abs.corr"],
                     ID           = names(zvec)[idx],
                     Z            = zvec[idx],
-                    PIP          = pip_vec[idx]
+                    PIP          = pip_vec[names(zvec)[idx]]
                 )
             }
             cs_df <- rbindlist(cs_rows, fill = TRUE)
@@ -1208,6 +1208,13 @@ task plot_locus {
         library(data.table)
         library(ggplot2)
         library(cowplot)
+
+        # Function to clean variant IDs: remove DRAGEN: prefix and replace colons with underscores
+        clean_variant_id <- function(id) {
+            id <- gsub("^DRAGEN:", "", id)
+            id <- gsub(":", "_", id)
+            return(id)
+        }
 
         phenotype <- "~{phenotype}"
         chrom <- "~{chrom}"
@@ -1330,18 +1337,22 @@ task plot_locus {
         ]
         plot_df[, ld_bin := factor(ld_bin, levels = c("Unknown", "0", "0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0"))]
 
+        # Create display version of variant IDs (cleaned: remove DRAGEN: prefix, replace : with _)
+        plot_df[, display_id := sapply(ID, clean_variant_id)]
+        display_lead_id <- if (!is.na(lead_id)) clean_variant_id(lead_id) else NA_character_
+
         label_df <- unique(rbindlist(list(
             plot_df[ID == lead_id],
             plot_df[order(-PIP)][1:min(5, .N)],
             plot_df[in_credible_set == TRUE][1:min(5, .N)]
         ), fill = TRUE), by = "ID")
 
-        p_assoc <- ggplot(plot_df, aes(x = POS, y = neg_log10_p)) +
+        p_assoc <- ggplot(plot_df, aes(x = POS, y = PIP)) +
             geom_point(aes(color = ld_bin, size = pmax(PIP, 0.02), shape = in_credible_set), alpha = 0.85) +
             geom_hline(yintercept = -log10(p_threshold), linetype = "dashed", color = "firebrick") +
             geom_text(
                 data = label_df,
-                aes(label = ID),
+                aes(label = display_id),
                 size = 2.5,
                 vjust = -0.7,
                 check_overlap = TRUE,
@@ -1366,10 +1377,10 @@ task plot_locus {
                 expand = c(0, 0)
             ) +
             labs(
-                title = paste0("Locus plot: ", phenotype, " chr", chrom, ":", locus_start, "-", locus_end),
-                subtitle = paste0("Lead/index SNP: ", lead_id),
+                title = paste0("Locus plot: ", phenotype, " chr", chrom, "_", locus_start, "_", locus_end),
+                subtitle = paste0("Lead/index SNP: ", display_lead_id),
                 x = NULL,
-                y = expression(-log[10](P)),
+                y = "PIP",
                 color = expression(LD~(r^2)),
                 shape = "Credible set"
             ) +
@@ -1421,8 +1432,8 @@ task plot_locus {
                     geom_rect(
                         data = exons,
                         aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
-                        fill = "#2c3e50",
-                        color = "#34495e",
+                        fill = "white",
+                        color = "#4682b4",
                         alpha = 0.9
                     )
             }
@@ -1435,7 +1446,7 @@ task plot_locus {
                     hjust = 0.5,
                     vjust = 0,
                     fontface = "italic",
-                    color = "#2c3e50"
+                    color = "black"
                 ) +
                 scale_y_continuous(
                     limits = c(-0.2, max_track * track_spacing + 0.1),
