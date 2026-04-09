@@ -20,7 +20,7 @@ workflow susie_finemapping {
 
         ## Fine-mapping parameters 
         Float           p_threshold     = 5e-8   # genome-wide significance
-        Float           min_maf         = 0.004  # minimum minor allele frequency for locus discovery
+        Float           min_maf         = 0.001  # minimum minor allele frequency for locus discovery
         Float           max_geno_missing = 0.05  # mirror GWAS-side PLINK missingness filter
         Boolean         pass_only_var_filter = true
         String?         plink_var_filter          # optional PLINK --var-filter exception names
