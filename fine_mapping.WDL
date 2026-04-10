@@ -907,7 +907,7 @@ task run_susie {
         Boolean refine
         Boolean estimate_residual_variance
         String  docker
-        String  instance_type = "mem2_ssd1_v2_x16"  # increased from x8 to fix out-of-memory errors
+        String  instance_type = "mem2_ssd1_v2_x8"
     }
 
     command <<<
