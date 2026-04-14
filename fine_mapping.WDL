@@ -998,6 +998,23 @@ task run_susie {
             )
         }
 
+        ## Reorder z-scores to match LD matrix order
+        if (!identical(names(z_all), rownames(R_mat))) {
+            log_diag(
+                "Reordering z-scores to match LD matrix variant order",
+                "z-score IDs match LD rownames:", all(names(z_all) %in% rownames(R_mat))
+            )
+            matching_ids <- intersect(names(z_all), rownames(R_mat))
+            if (length(matching_ids) < length(z_all)) {
+                log_diag(
+                    "WARNING: Only", length(matching_ids), "of", length(z_all),
+                    "z-score IDs found in LD matrix"
+                )
+            }
+            z_all <- z_all[matching_ids]
+            R_mat <- R_mat[matching_ids, matching_ids, drop = FALSE]
+        }
+
         ## First drop variants without usable z-scores; unmatched GWAS variants
         ## should not be allowed to poison the LD QC for the matched subset.
         bad_z <- !is.finite(z_all)
@@ -1062,8 +1079,10 @@ task run_susie {
             "kept =", n_kept
         )
 
-        excluded_df$exclude_nonfinite_ld[keep_finite_z] <- bad_ld_snp
-        excluded_df$kept_for_susie[keep_finite_z] <- keep_snps
+        ## Update excluded_df with LD and final keep status for finite-Z SNPs
+        finite_z_ids <- names(zvec)
+        excluded_df$exclude_nonfinite_ld[match(finite_z_ids, excluded_df$ID)] <- bad_ld_snp
+        excluded_df$kept_for_susie[match(finite_z_ids[keep_snps], excluded_df$ID)] <- TRUE
         fwrite(excluded_df, paste0(out_prefix, ".excluded_snps.tsv"), sep = "\t")
 
         if (n_kept == 0) {
