@@ -1013,6 +1013,9 @@ task run_susie {
             }
             z_all <- z_all[matching_ids]
             R_mat <- R_mat[matching_ids, matching_ids, drop = FALSE]
+            
+            ## Ensure R_mat row/col order matches z_all order
+            R_mat <- R_mat[names(z_all), names(z_all), drop = FALSE]
         }
 
         ## First drop variants without usable z-scores; unmatched GWAS variants
