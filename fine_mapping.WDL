@@ -813,6 +813,7 @@ task prepare_locus_sumstats {
         )
         print(f"Window summary-stat rows in locus: {len(window)}")
 
+        # Use only GWAS ID columns (rename to avoid confusion with ld_pvar IDs)
         ss_cols = [
             "ID", "norm_id", "coord_alleles", "CHROM", "POS", "ALLELE0", "ALLELE1",
             "BETA", "SE", "Z", "A1FREQ", "N", "LOG10P", "P"
@@ -823,6 +824,8 @@ task prepare_locus_sumstats {
             how="left",
             suffixes=("", "_ss"),
         )
+        # Preserve ld_pvar ID as LD_ID and GWAS ID as GWAS_ID to avoid confusion
+        by_id = by_id.rename(columns={"ID": "LD_ID", "ID_ss": "GWAS_ID"})
         n_id_matches = by_id["Z"].notna().sum()
 
         unmatched = by_id["Z"].isna()
@@ -834,15 +837,23 @@ task prepare_locus_sumstats {
         )
         if not by_coord.empty:
             by_coord = by_coord.drop(columns=["norm_id_ss"], errors="ignore")
+            # Rename IDs in by_coord to match by_id naming
+            by_coord = by_coord.rename(columns={"ID": "LD_ID", "ID_ss": "GWAS_ID"})
+            # Only update rows where matching failed (by_coord has non-null Z)
             for col in by_coord.columns:
-                by_id.loc[unmatched, col] = by_coord[col].values
+                if col in by_id.columns:
+                    by_id.loc[unmatched, col] = by_coord[col].values
         n_coord_matches = by_coord["Z"].notna().sum() if not by_coord.empty else 0
 
+        # Merge ld_snps (which has PLINK IDs as "ID") with summary stat data from by_id
+        # Use LD_ID as the key since it contains the PLINK pvar IDs
+        by_id_for_merge = by_id[[
+            "LD_ID", "CHROM_ss", "POS_ss", "ALLELE0", "ALLELE1",
+            "BETA", "SE", "Z", "A1FREQ", "N", "LOG10P", "P", "REF", "ALT"
+        ]].rename(columns={"CHROM_ss": "CHROM", "POS_ss": "POS", "LD_ID": "ID"})
+        
         merged = ld_snps.merge(
-            by_id[[
-                "ID", "CHROM_ss", "POS_ss", "ALLELE0", "ALLELE1",
-                "BETA", "SE", "Z", "A1FREQ", "N", "LOG10P", "P", "REF", "ALT"
-            ]].rename(columns={"CHROM_ss": "CHROM", "POS_ss": "POS"}),
+            by_id_for_merge,
             on="ID",
             how="left",
         )
@@ -1034,6 +1045,14 @@ task run_susie {
             R_mat <- R_mat[names(z_all), names(z_all), drop = FALSE]
         }
 
+        ## Verify name alignment
+        if (!identical(names(z_all), rownames(R_mat))) {
+            stop(sprintf(
+                "FATAL: After reordering, z-score names don't match LD matrix rownames. z[1]=%s ld[1]=%s",
+                names(z_all)[1], rownames(R_mat)[1]
+            ))
+        }
+
         ## First drop variants without usable z-scores; unmatched GWAS variants
         ## should not be allowed to poison the LD QC for the matched subset.
         bad_z <- !is.finite(z_all)
@@ -1114,6 +1133,21 @@ task run_susie {
 
         R_mat <- R_mat[keep_snps, keep_snps, drop = FALSE]
         zvec <- zvec[keep_snps]
+
+        ## Diagnostic: Check LD structure before SuSiE
+        off_diag_vals <- R_mat[upper.tri(R_mat)]
+        mean_abs_r <- mean(abs(off_diag_vals))
+        max_abs_r <- max(abs(off_diag_vals))
+        n_r_nonzero <- sum(abs(off_diag_vals) > 1e-6)
+        log_diag(
+            "LD matrix structure: n_snps =", nrow(R_mat),
+            "mean_abs_r =", round(mean_abs_r, 4),
+            "max_abs_r =", round(max_abs_r, 4),
+            "off_diag_nonzero =", n_r_nonzero, "/", length(off_diag_vals)
+        )
+        if (mean_abs_r < 0.01) {
+            warning("LD matrix is very sparse (mean_abs_r < 0.01); credible sets may be all size=1")
+        }
 
         ## Check LD / z-score consistency (Zou et al. 2022)
         log_diag("Checking z-score / LD consistency")
