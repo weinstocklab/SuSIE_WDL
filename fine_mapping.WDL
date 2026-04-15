@@ -868,7 +868,9 @@ task prepare_locus_sumstats {
 
         n_missing = (~np.isfinite(merged["Z"])).sum()
         if n_missing > 0:
-            print(f"WARNING: {n_missing} LD variants have missing/non-finite z-scores")
+            print(f"WARNING: {n_missing} LD variants have missing/non-finite z-scores; removing them before output")
+            merged = merged[np.isfinite(merged["Z"])].reset_index(drop=True)
+            print(f"After removing missing z-scores: {len(merged)} variants remain")
 
         merged.to_csv("zscore_~{phenotype}_~{chrom}_~{start}_~{end}.tsv", sep="\t", index=False)
         print(f"Prepared {len(merged)} variants for SuSiE")
@@ -984,18 +986,32 @@ task run_susie {
         storage.mode(R_mat) <- "double"
         rownames(R_mat) <- snp_ids
         colnames(R_mat) <- snp_ids
-        if (length(z_all) != nrow(R_mat)) {
-            log_diag(
-                "z-score / LD dimension mismatch:",
-                "z =", length(z_all),
-                "ld_rows =", nrow(R_mat)
-            )
-            stop(
-                sprintf(
-                    "z-score / LD dimension mismatch: %d z-scores vs %d LD rows",
-                    length(z_all), nrow(R_mat)
+         if (length(z_all) != nrow(R_mat)) {
+            ## Check if z_all is a subset of R_mat rownames; this can happen if some LD variants
+            ## don't have matching summary statistics
+            if (all(names(z_all) %in% rownames(R_mat)) && length(z_all) < nrow(R_mat)) {
+                log_diag(
+                    "z-score / LD dimension mismatch (z-scores are subset of LD):",
+                    "z =", length(z_all),
+                    "ld_rows =", nrow(R_mat),
+                    "Subsetting LD matrix to z-score variants"
                 )
-            )
+                matching_ids <- intersect(names(z_all), rownames(R_mat))
+                z_all <- z_all[matching_ids]
+                R_mat <- R_mat[matching_ids, matching_ids, drop = FALSE]
+            } else {
+                log_diag(
+                    "z-score / LD dimension mismatch:",
+                    "z =", length(z_all),
+                    "ld_rows =", nrow(R_mat)
+                )
+                stop(
+                    sprintf(
+                        "z-score / LD dimension mismatch: %d z-scores vs %d LD rows",
+                        length(z_all), nrow(R_mat)
+                    )
+                )
+            }
         }
 
         ## Reorder z-scores to match LD matrix order
