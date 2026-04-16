@@ -1178,6 +1178,7 @@ task run_susie {
                 tol                        = tol,
                 refine                     = refine,
                 estimate_residual_variance = estimate_residual_var,
+                unmappable_effects         = "ash",
                 verbose                    = TRUE
             ),
             error = function(e) { log_diag("susie_rss failed:", conditionMessage(e)); NULL }
