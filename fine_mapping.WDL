@@ -1484,6 +1484,7 @@ task plot_locus {
         exon_height      <- 0.50       # height of exon CDS blocks
         track_spacing    <- 1.0        # vertical distance between track centers
         label_offset     <- 0.35       # how far above the gene body the label sits
+        max_track        <- 0          # default when no genes present
 
         if (nrow(genes) > 0) {
             genes <- assign_gene_tracks(copy(genes))
