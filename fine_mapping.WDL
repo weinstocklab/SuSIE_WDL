@@ -137,20 +137,31 @@ workflow susie_finemapping {
                 docker                     = r_docker,
                 instance_type              = determine_instance_type.instance_type
         }
+    }
+
+    ## Scatter 2: Plotting only (depends only on Scatter 1 outputs)
+    ## This separation allows DNAnexus to cache expensive Scatter 1 results between runs
+    scatter (i in range(n_loci)) {
+
+        String plot_locus_phenotype = loci[i + 1][0]
+        String plot_locus_chrom     = loci[i + 1][1]
+        String plot_locus_index_snp = loci[i + 1][3]
+        String plot_locus_start     = loci[i + 1][4]
+        String plot_locus_end       = loci[i + 1][5]
 
         ## 5. Create locuszoom-style plot with SuSiE overlays
         call plot_locus {
             input:
-                z_scores          = prepare_locus_sumstats.z_scores_tsv,
-                pip_tsv           = run_susie.pip_tsv,
-                credible_sets_tsv = run_susie.credible_sets_tsv,
-                ld_matrix         = compute_ld.ld_matrix,
-                variant_ids       = compute_ld.variant_ids,
-                phenotype         = locus_phenotype,
-                chrom             = locus_chrom,
-                start             = locus_start,
-                end               = locus_end,
-                index_snp         = locus_index_snp,
+                z_scores          = prepare_locus_sumstats.z_scores_tsv[i],
+                pip_tsv           = run_susie.pip_tsv[i],
+                credible_sets_tsv = run_susie.credible_sets_tsv[i],
+                ld_matrix         = compute_ld.ld_matrix[i],
+                variant_ids       = compute_ld.variant_ids[i],
+                phenotype         = plot_locus_phenotype,
+                chrom             = plot_locus_chrom,
+                start             = plot_locus_start,
+                end               = plot_locus_end,
+                index_snp         = plot_locus_index_snp,
                 p_threshold       = p_threshold,
                 docker            = r_docker
         }
@@ -1468,18 +1479,21 @@ task plot_locus {
                 plot.margin = margin(t = 5, r = 10, b = 0, l = 5, unit = "pt")
             )
 
+        # --- Gene annotation panel ---
+        gene_body_height <- 0.20       # height of the gene body bar
+        exon_height      <- 0.50       # height of exon CDS blocks
+        track_spacing    <- 1.0        # vertical distance between track centers
+        label_offset     <- 0.35       # how far above the gene body the label sits
+
         if (nrow(genes) > 0) {
             genes <- assign_gene_tracks(copy(genes))
             max_track <- max(genes$track)
-            gene_body_height <- 0.15
-            exon_height <- 0.4
-            track_spacing <- 0.6
 
             genes[, y_center := (track - 1) * track_spacing]
             genes[, `:=`(
                 y_min   = y_center - gene_body_height / 2,
                 y_max   = y_center + gene_body_height / 2,
-                label_y = y_center + exon_height / 2 + 0.1
+                label_y = y_center + exon_height / 2 + label_offset
             )]
 
             if (nrow(exons) > 0) {
@@ -1491,11 +1505,15 @@ task plot_locus {
                 )]
             }
 
+            # Generous y-axis: from below track 1 to above the highest label
+            y_lower <- -gene_body_height
+            y_upper <- max(genes$label_y) + 0.5
+
             p_genes <- ggplot() +
                 geom_rect(
                     data = genes,
                     aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
-                    fill = "#cccccc",
+                    fill  = "#cccccc",
                     color = "#999999",
                     alpha = 0.7
                 )
@@ -1505,7 +1523,7 @@ task plot_locus {
                     geom_rect(
                         data = exons,
                         aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
-                        fill = "white",
+                        fill  = "white",
                         color = "#4682b4",
                         alpha = 0.9
                     )
@@ -1515,14 +1533,14 @@ task plot_locus {
                 geom_text(
                     data = genes,
                     aes(x = (start + end) / 2, y = label_y, label = gene_name),
-                    size = 3.8,
-                    hjust = 0.5,
-                    vjust = 0,
+                    size     = 3.2,
+                    hjust    = 0.5,
+                    vjust    = 0,
                     fontface = "italic",
-                    color = "black"
+                    color    = "black"
                 ) +
                 scale_y_continuous(
-                    limits = c(-0.2, max_track * track_spacing + 0.1),
+                    limits = c(y_lower, y_upper),
                     expand = expansion(mult = c(0, 0))
                 ) +
                 scale_x_continuous(
@@ -1532,25 +1550,32 @@ task plot_locus {
                 labs(x = paste0("Position on chr", chrom)) +
                 theme_void() +
                 theme(
-                    axis.title.x = element_text(size = 10, margin = margin(t = 4)),
-                    plot.margin = margin(t = 0, r = 10, b = 5, l = 5, unit = "pt")
+                    axis.title.x    = element_text(size = 10, margin = margin(t = 4)),
+                    plot.margin     = margin(t = 2, r = 10, b = 5, l = 5, unit = "pt"),
+                    plot.background = element_rect(fill = "white", color = NA)
                 )
         } else {
             p_genes <- ggplot() +
                 geom_blank() +
-                scale_x_continuous(
-                    limits = c(locus_start, locus_end),
-                    expand = c(0, 0)
-                ) +
+                scale_x_continuous(limits = c(locus_start, locus_end), expand = c(0, 0)) +
                 labs(x = paste0("Position on chr", chrom)) +
                 theme_void() +
                 theme(
-                    axis.title.x = element_text(size = 10, margin = margin(t = 4)),
-                    plot.margin = margin(t = 0, r = 10, b = 5, l = 5, unit = "pt")
+                    axis.title.x    = element_text(size = 10, margin = margin(t = 4)),
+                    plot.margin     = margin(t = 2, r = 10, b = 5, l = 5, unit = "pt"),
+                    plot.background = element_rect(fill = "white", color = NA)
                 )
         }
 
-        p <- cowplot::plot_grid(p_assoc, p_genes, ncol = 1, align = "v", rel_heights = c(5, 1.2))
+        # Dynamic gene panel height: at least 1.2, scales up with track count
+        gene_panel_height <- max(1.2, max_track * 0.7)
+
+        p <- cowplot::plot_grid(
+            p_assoc, p_genes,
+            ncol        = 1,
+            align       = "v",
+            rel_heights = c(5, gene_panel_height)
+        )
 
         ggsave(paste0(out_prefix, ".pdf"), p, width = 10, height = 7)
         ggsave(paste0(out_prefix, ".png"), p, width = 10, height = 7, dpi = 200)
