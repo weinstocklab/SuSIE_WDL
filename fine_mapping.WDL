@@ -1291,6 +1291,7 @@ task plot_locus {
 
         library(data.table)
         library(ggplot2)
+        library(ggrepel)
         library(cowplot)
 
         # Function to clean variant IDs: remove DRAGEN: prefix and replace colons with underscores
@@ -1480,11 +1481,10 @@ task plot_locus {
             )
 
         # --- Gene annotation panel ---
-        gene_body_height <- 0.20       # height of the gene body bar
-        exon_height      <- 0.50       # height of exon CDS blocks
-        track_spacing    <- 1.0        # vertical distance between track centers
-        label_offset     <- 0.35       # how far above the gene body the label sits
-        max_track        <- 0          # default when no genes present
+        gene_body_height <- 0.15
+        exon_height      <- 0.35
+        track_spacing    <- 1.4        # increased: must exceed text height + gene body
+        label_offset     <- 0.28
 
         if (nrow(genes) > 0) {
             genes <- assign_gene_tracks(copy(genes))
@@ -1494,11 +1494,13 @@ task plot_locus {
             genes[, `:=`(
                 y_min   = y_center - gene_body_height / 2,
                 y_max   = y_center + gene_body_height / 2,
-                label_y = y_center + exon_height / 2 + label_offset
+                label_y = y_center + exon_height / 2 + label_offset,
+                label_x = (start + end) / 2
             )]
 
             if (nrow(exons) > 0) {
-                exons <- merge(exons, genes[, .(gene_id, track, y_center)], by = "gene_id", all.x = TRUE)
+                exons <- merge(exons, genes[, .(gene_id, track, y_center)],
+                               by = "gene_id", all.x = TRUE)
                 exons <- exons[!is.na(track)]
                 exons[, `:=`(
                     y_min = y_center - exon_height / 2,
@@ -1506,43 +1508,45 @@ task plot_locus {
                 )]
             }
 
-            # Generous y-axis: from below track 1 to above the highest label
             y_lower <- -gene_body_height
-            y_upper <- max(genes$label_y) + 0.5
+            y_upper <- max(genes$label_y) + 0.6
 
             p_genes <- ggplot() +
                 geom_rect(
-                    data = genes,
+                    data  = genes,
                     aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
-                    fill  = "#cccccc",
-                    color = "#999999",
-                    alpha = 0.7
+                    fill  = "#cccccc", color = "#888888", linewidth = 0.3, alpha = 0.8
                 )
 
             if (nrow(exons) > 0) {
                 p_genes <- p_genes +
                     geom_rect(
-                        data = exons,
+                        data  = exons,
                         aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
-                        fill  = "white",
-                        color = "#4682b4",
-                        alpha = 0.9
+                        fill  = "#4682b4", color = "#2c5f8a", linewidth = 0.3, alpha = 0.85
                     )
             }
 
             p_genes <- p_genes +
-                geom_text(
-                    data = genes,
-                    aes(x = (start + end) / 2, y = label_y, label = gene_name),
-                    size     = 3.2,
-                    hjust    = 0.5,
-                    vjust    = 0,
-                    fontface = "italic",
-                    color    = "black"
+                # Use ggrepel instead of geom_text — handles crowded labels properly
+                ggrepel::geom_text_repel(
+                    data        = genes,
+                    aes(x = label_x, y = label_y, label = gene_name),
+                    size        = 2.8,
+                    fontface    = "italic",
+                    color       = "black",
+                    direction   = "x",          # only repel horizontally
+                    nudge_y     = 0.05,
+                    segment.size     = 0.2,
+                    segment.color    = "grey60",
+                    min.segment.length = 0.2,
+                    max.overlaps = Inf,         # show ALL labels, no dropping
+                    force        = 0.5,
+                    box.padding  = 0.1
                 ) +
                 scale_y_continuous(
                     limits = c(y_lower, y_upper),
-                    expand = expansion(mult = c(0, 0))
+                    expand = expansion(mult = c(0.05, 0.1))
                 ) +
                 scale_x_continuous(
                     limits = c(locus_start, locus_end),
@@ -1551,25 +1555,24 @@ task plot_locus {
                 labs(x = paste0("Position on chr", chrom)) +
                 theme_void() +
                 theme(
-                    axis.title.x    = element_text(size = 10, margin = margin(t = 4)),
-                    plot.margin     = margin(t = 2, r = 10, b = 5, l = 5, unit = "pt"),
+                    axis.title.x    = element_text(size = 10, margin = margin(t = 5)),
+                    plot.margin     = margin(t = 4, r = 10, b = 6, l = 5, unit = "pt"),
                     plot.background = element_rect(fill = "white", color = NA)
                 )
         } else {
-            p_genes <- ggplot() +
-                geom_blank() +
+            max_track <- 1
+            p_genes <- ggplot() + geom_blank() +
                 scale_x_continuous(limits = c(locus_start, locus_end), expand = c(0, 0)) +
                 labs(x = paste0("Position on chr", chrom)) +
                 theme_void() +
                 theme(
-                    axis.title.x    = element_text(size = 10, margin = margin(t = 4)),
-                    plot.margin     = margin(t = 2, r = 10, b = 5, l = 5, unit = "pt"),
+                    axis.title.x    = element_text(size = 10, margin = margin(t = 5)),
                     plot.background = element_rect(fill = "white", color = NA)
                 )
         }
 
-        # Dynamic gene panel height: at least 1.2, scales up with track count
-        gene_panel_height <- max(1.2, max_track * 0.7)
+        # Increase height more aggressively for crowded loci
+        gene_panel_height <- max(1.8, max_track * 0.9)
 
         p <- cowplot::plot_grid(
             p_assoc, p_genes,
@@ -1578,8 +1581,11 @@ task plot_locus {
             rel_heights = c(5, gene_panel_height)
         )
 
-        ggsave(paste0(out_prefix, ".pdf"), p, width = 10, height = 7)
-        ggsave(paste0(out_prefix, ".png"), p, width = 10, height = 7, dpi = 200)
+        # Also increase overall figure height to give the gene panel room
+        fig_height <- 5 + gene_panel_height * 0.9
+
+        ggsave(paste0(out_prefix, ".pdf"), p, width = 12, height = fig_height)
+        ggsave(paste0(out_prefix, ".png"), p, width = 12, height = fig_height, dpi = 200)
         fwrite(plot_df, paste0(out_prefix, ".plot_data.tsv"), sep = "\t")
         REOF
     >>>
