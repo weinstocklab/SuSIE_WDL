@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pre-install all R packages used by run_susie and plot_locus
 RUN Rscript -e "\
     install.packages( \
-        c('susieR', 'data.table', 'Rfast', 'ggplot2', 'cowplot'), \
+        c('susieR', 'data.table', 'Rfast', 'ggplot2', 'ggrepel', 'cowplot'), \
         repos = 'https://cloud.r-project.org', \
         quiet = TRUE \
     )"
