@@ -1362,29 +1362,33 @@ task plot_locus {
         plot_df[is.na(credible_sets), credible_sets := ""]
         plot_df[, neg_log10_p := -log10(pmax(P, 1e-300))]
 
-        assign_gene_tracks <- function(gene_df) {
+        assign_gene_tracks <- function(gene_df, locus_start, locus_end, label_char_width = 8e4) {
             if (nrow(gene_df) == 0) return(gene_df)
 
             gene_df <- gene_df[order(start, end)]
             tracks <- integer(nrow(gene_df))
             tracks[1] <- 1L
-            buffer <- 1000
+
+            # effective end = max of gene body end OR label right edge
+            locus_width <- locus_end - locus_start
+            label_buf <- max(locus_width * 0.06, label_char_width)  # ~6% of locus width
+
+            effective_end <- pmax(gene_df$end, (gene_df$start + gene_df$end) / 2 + label_buf)
 
             if (nrow(gene_df) > 1) {
                 for (i in 2:nrow(gene_df)) {
                     for (track in seq_len(i)) {
                         overlaps <- FALSE
                         for (j in seq_len(i - 1)) {
-                            if (tracks[j] == track && gene_df$start[i] <= gene_df$end[j] + buffer) {
+                            if (tracks[j] == track &&
+                                gene_df$start[i] < effective_end[j]) {
                                 overlaps <- TRUE
                                 break
                             }
                         }
-                        if (!overlaps) {
-                            tracks[i] <- track
-                            break
-                        }
+                        if (!overlaps) { tracks[i] <- track; break }
                     }
+                    if (tracks[i] == 0L) tracks[i] <- max(tracks[seq_len(i-1)]) + 1L
                 }
             }
 
@@ -1487,7 +1491,7 @@ task plot_locus {
         label_offset     <- 0.28
 
         if (nrow(genes) > 0) {
-            genes <- assign_gene_tracks(copy(genes))
+            genes <- assign_gene_tracks(copy(genes), locus_start, locus_end)
             max_track <- max(genes$track)
 
             genes[, y_center := (track - 1) * track_spacing]
@@ -1509,7 +1513,7 @@ task plot_locus {
             }
 
             y_lower <- -gene_body_height
-            y_upper <- max(genes$label_y) + 0.6
+            y_upper <- max(genes$label_y) + 1.2
 
             p_genes <- ggplot() +
                 geom_rect(
@@ -1528,21 +1532,23 @@ task plot_locus {
             }
 
             p_genes <- p_genes +
-                # Use ggrepel instead of geom_text — handles crowded labels properly
+                # Use ggrepel with bidirectional repulsion to handle crowded labels
                 ggrepel::geom_text_repel(
-                    data        = genes,
+                    data             = genes,
                     aes(x = label_x, y = label_y, label = gene_name),
-                    size        = 2.8,
-                    fontface    = "italic",
-                    color       = "black",
-                    direction   = "x",          # only repel horizontally
-                    nudge_y     = 0.05,
-                    segment.size     = 0.2,
-                    segment.color    = "grey60",
-                    min.segment.length = 0.2,
-                    max.overlaps = Inf,         # show ALL labels, no dropping
-                    force        = 0.5,
-                    box.padding  = 0.1
+                    size             = 2.5,
+                    fontface         = "italic",
+                    color            = "black",
+                    direction        = "both",         # allow vertical escape too
+                    segment.size     = 0.25,
+                    segment.color    = "grey50",
+                    segment.alpha    = 0.6,
+                    min.segment.length = 0.1,
+                    max.overlaps     = Inf,           # show ALL labels, no dropping
+                    force            = 1.2,            # stronger repulsion
+                    force_pull       = 0.5,
+                    box.padding      = 0.2,
+                    ylim             = c(NA, y_upper)  # don't push labels above panel top
                 ) +
                 scale_y_continuous(
                     limits = c(y_lower, y_upper),
@@ -1572,7 +1578,7 @@ task plot_locus {
         }
 
         # Increase height more aggressively for crowded loci
-        gene_panel_height <- max(1.8, max_track * 0.9)
+        gene_panel_height <- max(2.5, max_track * 1.1)
 
         p <- cowplot::plot_grid(
             p_assoc, p_genes,
