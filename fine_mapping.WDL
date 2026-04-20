@@ -191,6 +191,8 @@ workflow susie_finemapping {
         File          indel_pass_summary   = check_indel_pass.indel_summary
         Array[File]   locuszoom_pdfs       = plot_locus.plot_pdf
         Array[File]   locuszoom_pngs       = plot_locus.plot_png
+        Array[File?]  locuszoom_zoom_pdfs  = plot_locus.plot_zoom_pdf
+        Array[File?]  locuszoom_zoom_pngs  = plot_locus.plot_zoom_png
         Array[File]   locuszoom_plot_data  = plot_locus.plot_data_tsv
         File          loci_manifest        = identify_loci.loci_manifest
     }
