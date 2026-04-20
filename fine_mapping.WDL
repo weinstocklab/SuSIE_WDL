@@ -1436,162 +1436,212 @@ task plot_locus {
             plot_df[in_credible_set == TRUE][1:min(5, .N)]
         ), fill = TRUE), by = "ID")
 
-        p_assoc <- ggplot(plot_df, aes(x = POS, y = PIP)) +
-            geom_point(aes(color = ld_bin, size = pmax(PIP, 0.02), shape = in_credible_set), alpha = 0.85) +
-            geom_hline(yintercept = -log10(p_threshold), linetype = "dashed", color = "firebrick") +
-            geom_text(
-                data = label_df,
-                aes(label = display_id),
-                size = 2.5,
-                vjust = -0.7,
-                check_overlap = TRUE,
-                show.legend = FALSE
-            ) +
-            scale_color_manual(
-                values = c(
-                    "Unknown" = "grey70",
-                    "0" = "steelblue4",
-                    "0-0.2" = "deepskyblue3",
-                    "0.2-0.4" = "darkolivegreen3",
-                    "0.4-0.6" = "goldenrod2",
-                    "0.6-0.8" = "darkorange2",
-                    "0.8-1.0" = "firebrick3"
-                ),
-                drop = FALSE
-            ) +
-            scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17)) +
-            scale_size_continuous(range = c(1.2, 5), name = "SuSiE PIP") +
-            scale_x_continuous(
-                limits = c(locus_start, locus_end),
-                expand = c(0, 0)
-            ) +
-            labs(
-                title = paste0("Locus plot: ", phenotype, " chr", chrom, "_", locus_start, "_", locus_end),
-                subtitle = paste0("Lead/index SNP: ", display_lead_id),
-                x = NULL,
-                y = "PIP",
-                color = expression(LD~(r^2)),
-                shape = "Credible set"
-            ) +
-            theme_bw(base_size = 11) +
-            theme(
-                plot.title = element_text(face = "bold"),
-                legend.position = "right",
-                panel.grid.minor = element_blank(),
-                axis.title.x = element_blank(),
-                axis.text.x = element_blank(),
-                axis.ticks.x = element_blank(),
-                plot.margin = margin(t = 5, r = 10, b = 0, l = 5, unit = "pt")
-            )
-
-        # --- Gene annotation panel ---
-        gene_body_height <- 0.15
-        exon_height      <- 0.35
-        track_spacing    <- 1.4        # increased: must exceed text height + gene body
-        label_offset     <- 0.28
-
-        if (nrow(genes) > 0) {
-            genes <- assign_gene_tracks(copy(genes), locus_start, locus_end)
-            max_track <- max(genes$track)
-
-            genes[, y_center := (track - 1) * track_spacing]
-            genes[, `:=`(
-                y_min   = y_center - gene_body_height / 2,
-                y_max   = y_center + gene_body_height / 2,
-                label_y = y_center + exon_height / 2 + label_offset,
-                label_x = (start + end) / 2
-            )]
-
-            if (nrow(exons) > 0) {
-                exons <- merge(exons, genes[, .(gene_id, track, y_center)],
-                               by = "gene_id", all.x = TRUE)
-                exons <- exons[!is.na(track)]
-                exons[, `:=`(
-                    y_min = y_center - exon_height / 2,
-                    y_max = y_center + exon_height / 2
-                )]
-            }
-
-            y_lower <- -gene_body_height
-            y_upper <- max(genes$label_y) + 1.2
-
-            p_genes <- ggplot() +
-                geom_rect(
-                    data  = genes,
-                    aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
-                    fill  = "#cccccc", color = "#888888", linewidth = 0.3, alpha = 0.8
-                )
-
-            if (nrow(exons) > 0) {
-                p_genes <- p_genes +
-                    geom_rect(
-                        data  = exons,
-                        aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
-                        fill  = "#4682b4", color = "#2c5f8a", linewidth = 0.3, alpha = 0.85
-                    )
-            }
-
-            p_genes <- p_genes +
-                # Use ggrepel with bidirectional repulsion to handle crowded labels
-                ggrepel::geom_text_repel(
-                    data             = genes,
-                    aes(x = label_x, y = label_y, label = gene_name),
-                    size             = 2.5,
-                    fontface         = "italic",
-                    color            = "black",
-                    direction        = "both",         # allow vertical escape too
-                    segment.size     = 0.25,
-                    segment.color    = "grey50",
-                    segment.alpha    = 0.6,
-                    min.segment.length = 0.1,
-                    max.overlaps     = Inf,           # show ALL labels, no dropping
-                    force            = 1.2,            # stronger repulsion
-                    force_pull       = 0.5,
-                    box.padding      = 0.2,
-                    ylim             = c(NA, y_upper)  # don't push labels above panel top
+        # Function to create PIP plot with specified x-axis limits
+        create_pip_plot <- function(plot_data, x_min, x_max, plot_subtitle = NULL) {
+            ggplot(plot_data, aes(x = POS, y = PIP)) +
+                geom_point(aes(color = ld_bin, size = pmax(PIP, 0.02), shape = in_credible_set), alpha = 0.85) +
+                scale_color_manual(
+                    values = c(
+                        "Unknown" = "grey70",
+                        "0" = "steelblue4",
+                        "0-0.2" = "deepskyblue3",
+                        "0.2-0.4" = "darkolivegreen3",
+                        "0.4-0.6" = "goldenrod2",
+                        "0.6-0.8" = "darkorange2",
+                        "0.8-1.0" = "firebrick3"
+                    ),
+                    drop = FALSE
+                ) +
+                scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17)) +
+                scale_size_continuous(
+                    range = c(1.2, 5),
+                    name = "SuSiE PIP",
+                    limits = c(0, 1),
+                    breaks = c(0.02, 0.2, 0.5, 1.0)
                 ) +
                 scale_y_continuous(
-                    limits = c(y_lower, y_upper),
-                    expand = expansion(mult = c(0.05, 0.1))
+                    limits = c(0, 1),
+                    expand = c(0, 0),
+                    breaks = seq(0, 1, 0.2)
                 ) +
                 scale_x_continuous(
-                    limits = c(locus_start, locus_end),
+                    limits = c(x_min, x_max),
                     expand = c(0, 0)
                 ) +
-                labs(x = paste0("Position on chr", chrom)) +
-                theme_void() +
+                labs(
+                    title = paste0(phenotype, " chr", chrom, ":", format(x_min, scientific = FALSE, trim = TRUE), "-", format(x_max, scientific = FALSE, trim = TRUE)),
+                    subtitle = plot_subtitle,
+                    x = NULL,
+                    y = "PIP",
+                    color = expression(LD~(r^2)),
+                    shape = "Credible set"
+                ) +
+                theme_bw(base_size = 11) +
                 theme(
-                    axis.title.x    = element_text(size = 10, margin = margin(t = 5)),
-                    plot.margin     = margin(t = 4, r = 10, b = 6, l = 5, unit = "pt"),
-                    plot.background = element_rect(fill = "white", color = NA)
-                )
-        } else {
-            max_track <- 1
-            p_genes <- ggplot() + geom_blank() +
-                scale_x_continuous(limits = c(locus_start, locus_end), expand = c(0, 0)) +
-                labs(x = paste0("Position on chr", chrom)) +
-                theme_void() +
-                theme(
-                    axis.title.x    = element_text(size = 10, margin = margin(t = 5)),
-                    plot.background = element_rect(fill = "white", color = NA)
+                    plot.title = element_text(face = "bold", size = 12),
+                    plot.subtitle = element_text(size = 10),
+                    legend.position = "right",
+                    legend.box.margin = margin(l = 10),
+                    legend.title = element_text(size = 9),
+                    legend.text = element_text(size = 8),
+                    panel.grid.minor = element_blank(),
+                    axis.title.x = element_blank(),
+                    axis.text.x = element_blank(),
+                    axis.ticks.x = element_blank(),
+                    plot.margin = margin(t = 5, r = 15, b = 0, l = 5, unit = "pt")
                 )
         }
 
-        # Increase height more aggressively for crowded loci
-        gene_panel_height <- max(2.5, max_track * 1.1)
+        p_assoc_full <- create_pip_plot(plot_df, locus_start, locus_end, paste0("Lead SNP: ", display_lead_id))
 
-        p <- cowplot::plot_grid(
-            p_assoc, p_genes,
+        # Function to create gene panel for a given region
+        create_gene_panel <- function(x_min, x_max) {
+            genes_subset <- genes[start <= x_max & end >= x_min]
+
+            if (nrow(genes_subset) > 0) {
+                genes_subset <- assign_gene_tracks(copy(genes_subset), x_min, x_max)
+                max_track <- max(genes_subset$track)
+
+                genes_subset[, y_center := (track - 1) * track_spacing]
+                genes_subset[, `:=`(
+                    y_min   = y_center - gene_body_height / 2,
+                    y_max   = y_center + gene_body_height / 2,
+                    label_y = y_center + exon_height / 2 + label_offset,
+                    label_x = (start + end) / 2
+                )]
+
+                exons_subset <- exons[start <= x_max & end >= x_min]
+                if (nrow(exons_subset) > 0) {
+                    exons_subset <- merge(exons_subset, genes_subset[, .(gene_id, track, y_center)],
+                                   by = "gene_id", all.x = TRUE)
+                    exons_subset <- exons_subset[!is.na(track)]
+                    exons_subset[, `:=`(
+                        y_min = y_center - exon_height / 2,
+                        y_max = y_center + exon_height / 2
+                    )]
+                }
+
+                y_lower <- -gene_body_height
+                y_upper <- max(genes_subset$label_y) + 1.2
+
+                p_g <- ggplot() +
+                    geom_rect(
+                        data  = genes_subset,
+                        aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
+                        fill  = "#cccccc", color = "#888888", linewidth = 0.3, alpha = 0.8
+                    )
+
+                if (nrow(exons_subset) > 0) {
+                    p_g <- p_g +
+                        geom_rect(
+                            data  = exons_subset,
+                            aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
+                            fill  = "#4682b4", color = "#2c5f8a", linewidth = 0.3, alpha = 0.85
+                        )
+                }
+
+                p_g <- p_g +
+                    ggrepel::geom_text_repel(
+                        data             = genes_subset,
+                        aes(x = label_x, y = label_y, label = gene_name),
+                        size             = 2.5,
+                        fontface         = "italic",
+                        color            = "black",
+                        direction        = "both",
+                        segment.size     = 0.25,
+                        segment.color    = "grey50",
+                        segment.alpha    = 0.6,
+                        min.segment.length = 0.1,
+                        max.overlaps     = Inf,
+                        force            = 1.2,
+                        force_pull       = 0.5,
+                        box.padding      = 0.2,
+                        ylim             = c(NA, y_upper)
+                    ) +
+                    scale_y_continuous(
+                        limits = c(y_lower, y_upper),
+                        expand = expansion(mult = c(0.05, 0.1))
+                    ) +
+                    scale_x_continuous(
+                        limits = c(x_min, x_max),
+                        expand = c(0, 0)
+                    ) +
+                    labs(x = paste0("Position on chr", chrom)) +
+                    theme_void() +
+                    theme(
+                        axis.title.x    = element_text(size = 10, margin = margin(t = 5)),
+                        plot.margin     = margin(t = 4, r = 10, b = 6, l = 5, unit = "pt"),
+                        plot.background = element_rect(fill = "white", color = NA)
+                    )
+
+                list(plot = p_g, max_track = max_track)
+            } else {
+                p_g <- ggplot() + geom_blank() +
+                    scale_x_continuous(limits = c(x_min, x_max), expand = c(0, 0)) +
+                    labs(x = paste0("Position on chr", chrom)) +
+                    theme_void() +
+                    theme(
+                        axis.title.x    = element_text(size = 10, margin = margin(t = 5)),
+                        plot.background = element_rect(fill = "white", color = NA)
+                    )
+                list(plot = p_g, max_track = 1)
+            }
+        }
+
+        # --- Generate plot for full locus region ---
+        gene_body_height <- 0.15
+        exon_height      <- 0.35
+        track_spacing    <- 1.4
+        label_offset     <- 0.28
+
+        genes_full <- create_gene_panel(locus_start, locus_end)
+        p_genes_full <- genes_full$plot
+        max_track_full <- genes_full$max_track
+        gene_panel_height_full <- max(2.5, max_track_full * 1.1)
+
+        p_full <- cowplot::plot_grid(
+            p_assoc_full, p_genes_full,
             ncol        = 1,
             align       = "v",
-            rel_heights = c(5, gene_panel_height)
+            rel_heights = c(5, gene_panel_height_full)
         )
 
-        # Also increase overall figure height to give the gene panel room
-        fig_height <- 5 + gene_panel_height * 0.9
+        fig_height_full <- 5 + gene_panel_height_full * 0.9
 
-        ggsave(paste0(out_prefix, ".pdf"), p, width = 12, height = fig_height)
-        ggsave(paste0(out_prefix, ".png"), p, width = 12, height = fig_height, dpi = 200)
+        ggsave(paste0(out_prefix, ".pdf"), p_full, width = 12, height = fig_height_full)
+        ggsave(paste0(out_prefix, ".png"), p_full, width = 12, height = fig_height_full, dpi = 200)
+
+        # --- Generate zoomed plot (400kb window around lead SNP) ---
+        zoom_window <- 200000  # 200kb on each side = 400kb total
+        if (!is.na(lead_id) && lead_id %in% plot_df$ID) {
+            lead_pos <- plot_df[ID == lead_id, POS]
+            zoom_start <- pmax(locus_start, lead_pos - zoom_window)
+            zoom_end <- pmin(locus_end, lead_pos + zoom_window)
+            
+            if (zoom_start > locus_start || zoom_end < locus_end) {
+                plot_df_zoom <- plot_df[POS >= zoom_start & POS <= zoom_end]
+                p_assoc_zoom <- create_pip_plot(plot_df_zoom, zoom_start, zoom_end, NULL)
+
+                genes_zoom <- create_gene_panel(zoom_start, zoom_end)
+                p_genes_zoom <- genes_zoom$plot
+                max_track_zoom <- genes_zoom$max_track
+                gene_panel_height_zoom <- max(2.5, max_track_zoom * 1.1)
+
+                p_zoom <- cowplot::plot_grid(
+                    p_assoc_zoom, p_genes_zoom,
+                    ncol        = 1,
+                    align       = "v",
+                    rel_heights = c(5, gene_panel_height_zoom)
+                )
+
+                fig_height_zoom <- 5 + gene_panel_height_zoom * 0.9
+                out_prefix_zoom <- paste0(out_prefix, "_zoom")
+
+                ggsave(paste0(out_prefix_zoom, ".pdf"), p_zoom, width = 12, height = fig_height_zoom)
+                ggsave(paste0(out_prefix_zoom, ".png"), p_zoom, width = 12, height = fig_height_zoom, dpi = 200)
+            }
+        }
+
         fwrite(plot_df, paste0(out_prefix, ".plot_data.tsv"), sep = "\t")
         REOF
     >>>
@@ -1604,6 +1654,8 @@ task plot_locus {
     output {
         File plot_pdf      = "locuszoom_~{phenotype}_~{chrom}_~{start}_~{end}.pdf"
         File plot_png      = "locuszoom_~{phenotype}_~{chrom}_~{start}_~{end}.png"
+        File? plot_zoom_pdf = "locuszoom_~{phenotype}_~{chrom}_~{start}_~{end}_zoom.pdf"
+        File? plot_zoom_png = "locuszoom_~{phenotype}_~{chrom}_~{start}_~{end}_zoom.png"
         File plot_data_tsv = "locuszoom_~{phenotype}_~{chrom}_~{start}_~{end}.plot_data.tsv"
     }
 }
