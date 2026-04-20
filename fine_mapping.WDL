@@ -1438,6 +1438,9 @@ task plot_locus {
 
         # Function to create PIP plot with specified x-axis limits
         create_pip_plot <- function(plot_data, x_min, x_max, plot_subtitle = NULL) {
+            # Clean phenotype name by removing "residual" prefix
+            phenotype_clean <- gsub("^residual_?", "", phenotype, ignore.case = TRUE)
+            
             ggplot(plot_data, aes(x = POS, y = PIP)) +
                 geom_point(aes(color = ld_bin, size = pmax(PIP, 0.02), shape = in_credible_set), alpha = 0.85) +
                 scale_color_manual(
@@ -1460,7 +1463,7 @@ task plot_locus {
                     breaks = c(0.02, 0.2, 0.5, 1.0)
                 ) +
                 scale_y_continuous(
-                    limits = c(0, 1),
+                    limits = c(-0.05, 1.05),
                     expand = c(0, 0),
                     breaks = seq(0, 1, 0.2)
                 ) +
@@ -1469,7 +1472,7 @@ task plot_locus {
                     expand = c(0, 0)
                 ) +
                 labs(
-                    title = paste0(phenotype, " chr", chrom, ":", format(x_min, scientific = FALSE, trim = TRUE), "-", format(x_max, scientific = FALSE, trim = TRUE)),
+                    title = paste0(phenotype_clean, " chr", chrom, ":", format(x_min, scientific = FALSE, trim = TRUE), "-", format(x_max, scientific = FALSE, trim = TRUE)),
                     subtitle = plot_subtitle,
                     x = NULL,
                     y = "PIP",
@@ -1618,7 +1621,7 @@ task plot_locus {
             zoom_start <- pmax(locus_start, lead_pos - zoom_window)
             zoom_end <- pmin(locus_end, lead_pos + zoom_window)
             
-            if (zoom_start > locus_start || zoom_end < locus_end) {
+            if ((zoom_end - zoom_start) < (locus_end - locus_start)) {
                 plot_df_zoom <- plot_df[POS >= zoom_start & POS <= zoom_end]
                 p_assoc_zoom <- create_pip_plot(plot_df_zoom, zoom_start, zoom_end, NULL)
 
