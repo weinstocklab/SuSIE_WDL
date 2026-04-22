@@ -1443,6 +1443,9 @@ task plot_locus {
             # Clean phenotype name by removing "residual" prefix
             phenotype_clean <- gsub("^residual_?", "", phenotype, ignore.case = TRUE)
             
+            # Mark the lead SNP
+            plot_data[, is_lead := ID == lead_id]
+            
             # Generate credible set colors for point outlines
             cs_colors <- c()
             if ("credible_sets" %in% names(plot_data)) {
@@ -1457,6 +1460,9 @@ task plot_locus {
             ggplot(plot_data, aes(x = POS, y = PIP)) +
                 geom_point(aes(color = ld_bin, size = pmax(PIP, 0.02), shape = in_credible_set, fill = ld_bin), 
                            stroke = 0.8, alpha = 0.85) +
+                geom_point(data = plot_data[is_lead == TRUE], 
+                           aes(x = POS, y = PIP), 
+                           color = "purple", size = 5, shape = 8, stroke = 1.2) +
                 scale_color_manual(
                     values = c(
                         "Unknown" = "grey70",
