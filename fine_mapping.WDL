@@ -1443,8 +1443,20 @@ task plot_locus {
             # Clean phenotype name by removing "residual" prefix
             phenotype_clean <- gsub("^residual_?", "", phenotype, ignore.case = TRUE)
             
+            # Generate credible set colors for point outlines
+            cs_colors <- c()
+            if ("credible_sets" %in% names(plot_data)) {
+                unique_cs <- unique(plot_data[credible_sets != "", credible_sets])
+                cs_palette <- c("red", "blue", "green", "purple", "orange", "brown", "pink", "gray")
+                cs_color_map <- setNames(cs_palette[seq_len(length(unique_cs))], unique_cs)
+                plot_data[, cs_outline := ifelse(credible_sets != "", cs_color_map[credible_sets], "black")]
+            } else {
+                plot_data[, cs_outline := "black"]
+            }
+            
             ggplot(plot_data, aes(x = POS, y = PIP)) +
-                geom_point(aes(color = ld_bin, size = pmax(PIP, 0.02), shape = in_credible_set), alpha = 0.85) +
+                geom_point(aes(color = ld_bin, size = pmax(PIP, 0.02), shape = in_credible_set, fill = ld_bin), 
+                           stroke = 0.8, alpha = 0.85) +
                 scale_color_manual(
                     values = c(
                         "Unknown" = "grey70",
@@ -1455,9 +1467,10 @@ task plot_locus {
                         "0.6-0.8" = "darkorange2",
                         "0.8-1.0" = "firebrick3"
                     ),
-                    drop = FALSE
+                    drop = FALSE,
+                    aesthetics = c("color", "fill")
                 ) +
-                scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17)) +
+                scale_shape_manual(values = c(`FALSE` = 21, `TRUE` = 24)) +
                 scale_size_continuous(
                     range = c(1.2, 5),
                     name = "SuSiE PIP",
@@ -1471,7 +1484,8 @@ task plot_locus {
                 ) +
                 scale_x_continuous(
                     limits = c(x_min, x_max),
-                    expand = c(0, 0)
+                    expand = c(0, 0),
+                    labels = function(x) format(x, scientific = FALSE, trim = TRUE)
                 ) +
                 labs(
                     title = paste0(phenotype_clean, " chr", chrom, ":", format(x_min, scientific = FALSE, trim = TRUE), "-", format(x_max, scientific = FALSE, trim = TRUE)),
@@ -1491,9 +1505,9 @@ task plot_locus {
                     legend.text = element_text(size = 8),
                     panel.grid.minor = element_blank(),
                     axis.title.x = element_blank(),
-                    axis.text.x = element_blank(),
-                    axis.ticks.x = element_blank(),
-                    plot.margin = margin(t = 5, r = 15, b = 0, l = 5, unit = "pt")
+                    axis.text.x = element_text(size = 9, angle = 45, hjust = 1),
+                    axis.ticks.x = element_line(size = 0.3),
+                    plot.margin = margin(t = 5, r = 15, b = 25, l = 5, unit = "pt")
                 )
         }
 
@@ -1541,7 +1555,7 @@ task plot_locus {
                         geom_rect(
                             data  = exons_subset,
                             aes(xmin = start, xmax = end, ymin = y_min, ymax = y_max),
-                            fill  = "#4682b4", color = "#2c5f8a", linewidth = 0.3, alpha = 0.85
+                            fill  = "#4682b4", color = "#1a3a66", linewidth = 0.4, alpha = 0.95
                         )
                 }
 
@@ -1553,9 +1567,9 @@ task plot_locus {
                         fontface         = "italic",
                         color            = "black",
                         direction        = "both",
-                        segment.size     = 0.25,
-                        segment.color    = "grey50",
-                        segment.alpha    = 0.6,
+                        segment.size     = 0.15,
+                        segment.color    = "grey70",
+                        segment.alpha    = 0.4,
                         min.segment.length = 0.1,
                         max.overlaps     = Inf,
                         force            = 1.2,
